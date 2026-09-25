@@ -69,6 +69,7 @@ import {
 import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
 import { getCookieSecret } from '../../users.js';
 import { fetchGoogleModels, GoogleModelsHttpError } from './google-models.js';
+import { ensureLmStudioContext } from './lmstudio-context.js';
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -2685,6 +2686,17 @@ router.post('/generate', async function (request, response) {
         };
 
         console.debug('Chat Completion request:', requestBody);
+
+        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM && request.body.lmstudio_match_context) {
+            await ensureLmStudioContext({
+                baseUrl: apiUrl,
+                model: request.body.model,
+                contextLength: request.body.lmstudio_context_length,
+                apiKey,
+                fetchImpl: fetch,
+                signal: controller.signal,
+            });
+        }
 
         const fetchResponse = await fetch(endpointUrl, config);
 

@@ -348,6 +348,7 @@ export const settingsToUpdate = {
     cometapi_model: ['#model_cometapi_select', 'cometapi_model', false, true],
     custom_model: ['#custom_model_id', 'custom_model', false, true],
     custom_url: ['#custom_api_url_text', 'custom_url', false, true],
+    lmstudio_match_context: ['#lmstudio_match_context', 'lmstudio_match_context', true, true],
     custom_include_body: ['#custom_include_body', 'custom_include_body', false, true],
     custom_exclude_body: ['#custom_exclude_body', 'custom_exclude_body', false, true],
     custom_include_headers: ['#custom_include_headers', 'custom_include_headers', false, true],
@@ -473,6 +474,7 @@ const default_settings = {
     azure_openai_model: '',
     custom_model: '',
     custom_url: '',
+    lmstudio_match_context: false,
     custom_include_body: '',
     custom_exclude_body: '',
     custom_include_headers: '',
@@ -2809,6 +2811,8 @@ export async function createGenerationParameters(settings, model, type, messages
         'presence_penalty': Number(settings.pres_pen_openai),
         'top_p': Number(settings.top_p_openai),
         'max_tokens': settings.openai_max_tokens,
+        'lmstudio_match_context': settings.chat_completion_source === chat_completion_sources.CUSTOM && settings.lmstudio_match_context,
+        'lmstudio_context_length': settings.openai_max_context,
         'stream': stream,
         'logit_bias': logit_bias,
         'stop': getCustomStoppingStrings(openai_max_stop_strings),
@@ -7081,6 +7085,11 @@ export function initOpenAI() {
 
     $('#custom_api_url_text').on('input', function () {
         oai_settings.custom_url = String($(this).val());
+        saveSettingsDebounced();
+    });
+
+    $('#lmstudio_match_context').on('change', function () {
+        oai_settings.lmstudio_match_context = Boolean($(this).prop('checked'));
         saveSettingsDebounced();
     });
 
