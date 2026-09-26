@@ -83,3 +83,69 @@ test('serializes simultaneous loads for the same model', async () => {
     ]);
     assert.equal(api.calls.filter(call => call.path === '/api/v1/models/unload').length, 1);
 });
+
+function switchingServer({ failNew = false, wrongContext = false } = {}) {
+    const state = new Map([['old-model', { context_length: 8192, flash_attention: true }]]);
+    const calls = [];
+    const fetchImpl = async (url, options) => {
+        const path = new URL(url).pathname;
+        const body = options.body && JSON.parse(options.body);
+        calls.push({ path, body, signal: options.signal });
+        if (path.endsWith('/unload')) {
+            state.delete(body.instance_id);
+            return { ok: true, json: async () => ({}) };
+        }
+        if (path.endsWith('/load')) {
+            if (body.model === 'new-model' && failNew) return { ok: false, status: 500, json: async () => ({ error: { message: 'Insufficient system resources' } }) };
+            const length = body.model === 'new-model' && wrongContext ? 4096 : body.context_length;
+            state.set(body.model, { context_length: length });
+            return { ok: true, json: async () => ({ status: 'loaded', load_config: { context_length: length } }) };
+        }
+        return { ok: true, json: async () => ({ models: [
+            ...['old-model', 'new-model'].map(key => ({ type: 'llm', key, max_context_length: 65536,
+                loaded_instances: state.has(key) ? [{ id: key, config: state.get(key) }] : [] })),
+            { type: 'embedding', key: 'embedding', loaded_instances: [{ id: 'embedding' }] },
+        ] }) };
+    };
+    return { state, calls, fetchImpl };
+}
+
+test('switch unloads the old LLM before loading the new model and leaves embeddings alone', async () => {
+    const api = switchingServer();
+    await ensureLmStudioContext({ ...options, model: 'new-model', fetchImpl: api.fetchImpl });
+    assert.deepEqual([...api.state.keys()], ['new-model']);
+    assert.deepEqual(api.calls.map(call => [call.path, call.body?.instance_id || call.body?.model]), [
+        ['/api/v1/models', undefined], ['/api/v1/models/unload', 'old-model'], ['/api/v1/models/load', 'new-model'],
+    ]);
+});
+
+test('failed switch restores the old model with its settings and reports the actual load error', async () => {
+    const api = switchingServer({ failNew: true });
+    const controller = new AbortController();
+    await assert.rejects(ensureLmStudioContext({ ...options, model: 'new-model', fetchImpl: api.fetchImpl, signal: controller.signal }), /Insufficient system resources/);
+    assert.deepEqual([...api.state.keys()], ['old-model']);
+    const restored = api.calls.at(-1);
+    assert.equal(restored.body.model, 'old-model');
+    assert.equal(restored.body.context_length, 8192);
+    assert.equal(restored.body.flash_attention, true);
+    assert.equal(restored.signal, null);
+});
+
+test('unconfirmed new context is unloaded before restoring the old model', async () => {
+    const api = switchingServer({ wrongContext: true });
+    await assert.rejects(ensureLmStudioContext({ ...options, model: 'new-model', fetchImpl: api.fetchImpl }), /did not confirm/);
+    assert.deepEqual([...api.state.keys()], ['old-model']);
+    assert.equal(api.calls.at(-2).body.instance_id, 'new-model');
+    assert.equal(api.calls.at(-1).body.model, 'old-model');
+});
+
+test('simultaneous switches to different models run sequentially on the same endpoint', async () => {
+    const api = switchingServer();
+    await Promise.all([
+        ensureLmStudioContext({ ...options, model: 'new-model', fetchImpl: api.fetchImpl }),
+        ensureLmStudioContext({ ...options, model: 'old-model', fetchImpl: api.fetchImpl }),
+    ]);
+    assert.deepEqual(api.calls.filter(call => call.body).map(call => call.body.instance_id || call.body.model),
+        ['old-model', 'new-model', 'new-model', 'old-model']);
+    assert.deepEqual([...api.state.keys()], ['old-model']);
+});

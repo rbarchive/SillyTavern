@@ -21,7 +21,12 @@ async function apiRequest(fetchImpl, url, apiKey, options = {}) {
         },
     });
     if (!result.ok) {
-        throw new Error(`LM Studio model management request failed (HTTP ${result.status}).`);
+        let detail = '';
+        try {
+            const body = await result.json();
+            if (typeof body?.error?.message === 'string') detail = ` ${body.error.message.slice(0, 500)}`;
+        } catch { /* Some errors have no JSON body. */ }
+        throw new Error(`LM Studio model management request failed (HTTP ${result.status}).${detail}`);
     }
     return result.json();
 }
@@ -48,27 +53,57 @@ async function ensureLoaded({ apiUrl, model, contextLength, apiKey, fetchImpl, s
     if (instances.length > 1 || (instances.length && !active)) {
         throw new Error('LM Studio has a differently named or additional instance of this model; manage it in LM Studio first.');
     }
-    if (active?.config?.context_length >= contextLength) return;
-
-    const previous = active?.config;
-    if (active) await request('/unload', { instance_id: active.id });
-
-    const loadBody = { model, context_length: contextLength, echo_load_config: true };
-    for (const key of ['eval_batch_size', 'flash_attention', 'num_experts', 'offload_kv_cache_to_gpu']) {
-        if (previous?.[key] !== undefined) loadBody[key] = previous[key];
+    const needsLoad = !(active?.config?.context_length >= contextLength);
+    const displaced = catalog.models.filter(entry => entry.type === 'llm').flatMap(entry =>
+        (entry.loaded_instances || []).filter(instance => entry.key !== model || needsLoad)
+            .map(instance => ({ model: entry.key, instance })));
+    if (displaced.some(({ model: key, instance }) => instance.id !== key || !Number.isSafeInteger(instance.config?.context_length))) {
+        throw new Error('LM Studio has a custom-named instance or missing load configuration; manage it in LM Studio before switching models.');
     }
+    if (new Set(displaced.map(entry => entry.model)).size !== displaced.length) {
+        throw new Error('LM Studio has multiple instances of a model; manage them in LM Studio before switching models.');
+    }
+    const loadSettings = (key, config, length) => {
+        const body = { model: key, context_length: length, echo_load_config: true };
+        for (const name of ['eval_batch_size', 'flash_attention', 'num_experts', 'offload_kv_cache_to_gpu']) {
+            if (config?.[name] !== undefined) body[name] = config[name];
+        }
+        return body;
+    };
+    const unloaded = [];
+    let loadAttempted = false;
     try {
-        const loaded = await request('/load', loadBody);
+        for (const entry of displaced) {
+            await request('/unload', { instance_id: entry.instance.id });
+            unloaded.push(entry);
+        }
+        if (!needsLoad) return;
+        loadAttempted = true;
+        const loaded = await request('/load', loadSettings(model, active?.config, contextLength));
         if (loaded.status !== 'loaded' || loaded.load_config?.context_length !== contextLength) {
             throw new Error('LM Studio did not confirm the requested context length.');
         }
     } catch (error) {
-        if (previous?.context_length) {
+        const recoveryErrors = [];
+        if (loadAttempted && unloaded.length) {
             try {
-                await request('/load', { ...loadBody, context_length: previous.context_length }, null);
-            } catch {
-                throw new Error(`LM Studio failed to load at ${contextLength} and could not restore the previous model: ${error.message}`);
-            }
+                const current = await request('', undefined, null);
+                const replacement = current.models?.find(entry => entry.key === model);
+                for (const instance of replacement?.loaded_instances || []) {
+                    await request('/unload', { instance_id: instance.id }, null);
+                }
+            } catch (cleanupError) { recoveryErrors.push(cleanupError.message); }
+        }
+        for (const entry of unloaded) {
+            try {
+                const restored = await request('/load', loadSettings(entry.model, entry.instance.config, entry.instance.config.context_length), null);
+                if (restored.status !== 'loaded' || restored.load_config?.context_length !== entry.instance.config.context_length) {
+                    throw new Error(`Could not confirm restored model "${entry.model}".`);
+                }
+            } catch (restoreError) { recoveryErrors.push(restoreError.message); }
+        }
+        if (recoveryErrors.length) {
+            throw new Error(`${error.message} Previous model recovery failed: ${recoveryErrors.join('; ')}`);
         }
         throw error;
     }
@@ -81,7 +116,7 @@ export async function ensureLmStudioContext(options) {
     if (!options.model || !Number.isSafeInteger(contextLength) || contextLength < 512) {
         throw new Error('Select an LM Studio model and a valid ST Context length first.');
     }
-    const key = `${apiUrl}\n${options.model}`;
+    const key = apiUrl;
     const previous = pendingLoads.get(key) || Promise.resolve();
     const current = previous.catch(() => {}).then(() => ensureLoaded({
         apiUrl,

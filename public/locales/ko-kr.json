@@ -402,7 +402,7 @@
     "Custom API Key": "커스텀 API 키",
     "Available Models": "사용 가능한 모델",
     "Load LM Studio model with ST Context length": "ST 컨텍스트 길이로 LM Studio 모델 로드",
-    "LM Studio only. When needed, this reloads the selected model before the next reply.": "LM Studio 전용. 필요한 경우 다음 응답 전에 선택한 모델을 다시 로드합니다.",
+    "LM Studio only. Before the next reply, unloads other LLMs and loads the selected model with ST Context length. Restores previous models if loading fails.": "LM Studio 전용. 다음 응답 전에 기존 LLM을 내리고 선택한 모델을 ST 컨텍스트 길이로 로드합니다. 로드 실패 시 이전 모델을 복구합니다.",
     "Prompt Post-Processing": "신속한 후처리",
     "api_no_connection": "연결이 되지 않았습니다...",
     "Applies additional processing to the prompt before sending it to the API.": "API로 보내기 전에 프롬프트에 추가 처리를 적용합니다.",
