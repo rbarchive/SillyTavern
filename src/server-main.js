@@ -20,6 +20,7 @@ import bodyParser from 'body-parser';
 
 // local library imports
 import './fetch-patch.js';
+import { closeLocalImageRuntime } from './endpoints/local-image-runtime.js';
 import { serverDirectory } from './server-directory.js';
 
 import { serverEvents, EVENT_NAMES } from './server-events.js';
@@ -317,6 +318,7 @@ async function preSetupTasks() {
     const exitProcess = async () => {
         if (isExiting) return;
         isExiting = true;
+        try { await closeLocalImageRuntime(); } catch (error) { console.error('Image runtime shutdown postponed:', error.message); isExiting = false; return; }
         await statsOnExit();
         if (typeof cleanupPlugins === 'function') {
             await cleanupPlugins();

@@ -1,6 +1,8 @@
 import { runGenerationJob, generationOrigin } from '../../generation-jobs.js';
 import { applyLocalImagePreset } from './local-image-preset.js';
 import { applyLocalImageModel } from './local-image-models.js';
+import { imageDescriptionSnapshot, mountImageDescriptionSettings } from './image-description-settings.js';
+import { imageBoostEnabled, mountImageBoostSettings } from './image-boost-settings.js';
 import { beginImageGenerationStatus } from './image-generation-status.js';
 import { prepareImageContinuity, collectImageEvidence, applyReferenceImage } from './image-continuity.js';
 import { Popper } from '../../../lib.js';
@@ -344,6 +346,7 @@ const defaultSettings = {
     comfy_type: 'standard',
 
     comfy_url: 'http://127.0.0.1:8188',
+    comfy_boost: true,
     comfy_workflow: 'Default_Comfy_Workflow.json',
 
     comfy_runpod_url: '',
@@ -3028,6 +3031,7 @@ async function generatePicture(initiator, args, trigger, message, callback) {
     const generationTypeKey = Object.keys(generationMode).find(key => generationMode[key] === generationType);
     console.log(`Image generation mode ${generationTypeKey} triggered with "${trigger}"`);
 
+    const descriptionSettings = [generationMode.FREE, generationMode.RAW_LAST, generationMode.FACE_MULTIMODAL, generationMode.CHARACTER_MULTIMODAL, generationMode.USER_MULTIMODAL].includes(generationType) ? null : imageDescriptionSnapshot(extension_settings.sd);
     let quietPrompt = getQuietPrompt(generationType, trigger);
     const context = getContext();
     const imageOrigin = { chatId: getCurrentChatId(), origin: structuredClone(generationOrigin()), evidence: collectImageEvidence(context.chat), currentRequest: trigger };
@@ -3085,13 +3089,13 @@ async function generatePicture(initiator, args, trigger, message, callback) {
             args?._abortController?.addEventListener('abort', stopListener, { once: true });
             loaderHandle = loader.show({ blocking: false, slug: `${MODULE_NAME}-image-generation`, title: t`Image Generation`,
                 message: '서버에서 이미지 생성 중 · 화면을 바꿔도 계속 처리됩니다', onStop: stopListener });
-            return await generateBackgroundImage(generationType, trigger, message, quietPrompt, negativePromptPrefix, characterName, initiator, abortController.signal, generationStatus, imageContinuity);
+            return await generateBackgroundImage(generationType, trigger, message, quietPrompt, negativePromptPrefix, characterName, initiator, abortController.signal, generationStatus, imageContinuity, descriptionSettings);
         }
 
         const combineNegatives = (prefix) => { negativePromptPrefix = combinePrefixes(negativePromptPrefix, prefix); };
 
         // generate the text prompt for the image
-        let prompt = await getPrompt(generationType, message, trigger, quietPrompt, combineNegatives);
+        let prompt = await getPrompt(generationType, message, trigger, quietPrompt, combineNegatives, descriptionSettings);
         console.log('Processed image prompt:', prompt);
 
         // Extension hook for prompt processing
@@ -3211,7 +3215,7 @@ function restoreOriginalDimensions(savedParams) {
  * @param {function} combineNegatives A function that combines the negative prompt with other prompts.
  * @returns {Promise<string>} - A promise that resolves when the prompt generation completes.
  */
-async function getPrompt(generationType, message, trigger, quietPrompt, combineNegatives) {
+async function getPrompt(generationType, message, trigger, quietPrompt, combineNegatives, descriptionSettings) {
     let prompt;
     console.log('getPrompt: Generation mode', generationType, 'triggered with', trigger);
     switch (generationType) {
@@ -3227,7 +3231,7 @@ async function getPrompt(generationType, message, trigger, quietPrompt, combineN
             prompt = await generateMultimodalPrompt(generationType, quietPrompt);
             break;
         default:
-            prompt = await generatePrompt(quietPrompt);
+            prompt = await generatePrompt(quietPrompt, descriptionSettings);
             break;
     }
 
@@ -3338,6 +3342,13 @@ function getUserAvatarUrl() {
  * @param {string} quietPrompt - The prompt to use for the image generation.
  * @returns {Promise<string>} - A promise that resolves when the prompt generation completes.
  */
+async function requestImageDescription(url, payload) {
+    const response = await fetch(url, { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(payload) });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '이미지 묘사 모델 연결에 실패했습니다.');
+    return data;
+}
+
 function imageDescriptionInstruction(quietPrompt) {
     return `${quietPrompt}\n\nReturn only a compact English image prompt with visual tags. Use the described subject and established scene facts. Do not discuss these instructions, prefixes, or who the user/assistant is. Omit any empty character prefix. No explanation, dialogue, or story continuation. /no_think`;
 }
@@ -3348,7 +3359,9 @@ function assertImageGenerationOrigin(snapshot) {
     }
 }
 
-async function generateBackgroundImage(generationType, trigger, message, quietPrompt, negative, folder, initiator, signal, status, imageContinuity) {
+async function generateBackgroundImage(generationType, trigger, message, quietPrompt, negative, folder, initiator, signal, status, imageContinuity, descriptionSettings) {
+    const preparationStarted = performance.now();
+    const boost = imageBoostEnabled(extension_settings.sd);
     const context = getContext();
     const origin = imageContinuity?.origin || generationOrigin();
     assertImageGenerationOrigin(imageContinuity);
@@ -3357,7 +3370,7 @@ async function generateBackgroundImage(generationType, trigger, message, quietPr
     if (generationType === generationMode.FREE) prompt = generateFreeModePrompt(trigger, prefix => { negative = combinePrefixes(negative, prefix); });
     else if (generationType === generationMode.RAW_LAST) prompt = message || getRawLastMessage();
     else {
-        const prepared = await generateQuietPrompt({ quietPrompt: imageDescriptionInstruction(quietPrompt), responseLength: 4096, prepareRequest: true });
+        const prepared = await generateQuietPrompt({ quietPrompt, responseLength: 4096, prepareRequest: true });
         if (!prepared?.request) throw new Error('이미지 묘사 요청을 준비하지 못했습니다.');
         chatRequest = prepared.request;
     }
@@ -3371,17 +3384,26 @@ async function generateBackgroundImage(generationType, trigger, message, quietPr
     assertImageGenerationOrigin(imageContinuity);
     const name = context.groupId ? systemUserName : context.name2;
     const messageTemplate = substituteParamsExtended(extension_settings.sd.prompts[generationMode.MESSAGE] || '{{prompt}}', { char: name, prompt: '{{prompt}}', prefixedPrompt: '{{prefixedPrompt}}' });
-    const job = await runGenerationJob({ kind: 'image', origin, operation: 'append', chatRequest,
-        image: { workflow, url: extension_settings.sd.comfy_url, prefix, negative: negativePrompt, prompt, folder,
-            minimal: extension_settings.sd.minimal_prompt_processing, generationType, messageTemplate, imageContext: imageContinuity?.provenance },
+    const job = await runGenerationJob({ kind: 'image', origin, operation: 'append', chatRequest, clientPreparationMs: Math.round(performance.now() - preparationStarted),
+        image: { workflow, url: extension_settings.sd.comfy_url, boost, prefix, negative: negativePrompt, prompt, folder,
+            minimal: extension_settings.sd.minimal_prompt_processing, generationType, messageTemplate, descriptionSettings, imageContext: imageContinuity?.provenance },
         message: { name, is_user: false, is_system: !getVisibilityByInitiator(initiator), send_date: getMessageTimeStamp(), mes: '', extra: {} },
-    }, signal, job => status.update(job.progress?.phase === 'drawing' ? t`Image generation: drawing image…` : t`Preparing image description with the chat model…`));
+    }, signal, job => status.update(job.progress?.phase === 'drawing' ? t`Image generation: drawing image…` : '이미지 묘사 준비 중…'));
     return job.result.path;
 }
 
-async function generatePrompt(quietPrompt) {
+async function generatePrompt(quietPrompt, descriptionSettings) {
     const toast = toastr.info(t`Preparing image description with the chat model…`, t`Image Generation`);
     try {
+        if (descriptionSettings) {
+            if (main_api !== 'openai' || oai_settings.chat_completion_source !== 'custom' || selected_group) throw new Error('전용 이미지 묘사는 현재 Custom Chat Completion에 연결한 단일 이야기에서 사용할 수 있습니다.');
+            const prepared = await generateQuietPrompt({ quietPrompt, responseLength: 4096, prepareRequest: true });
+            if (!Array.isArray(prepared?.request?.messages)) throw new Error('이미지 묘사에 필요한 대화 정보를 준비하지 못했습니다.');
+            const reply = await requestImageDescription('/api/image-description/generate', { settings: descriptionSettings, messages: prepared.request.messages });
+            const processedReply = processReply(reply.text);
+            if (!processedReply?.trim()) throw new Error('전용 모델이 유효한 이미지 묘사를 반환하지 않았습니다. 다시 시도해 주세요.');
+            return processedReply;
+        }
         const concisePrompt = imageDescriptionInstruction(quietPrompt);
         const reply = await generateQuietPrompt({ quietPrompt: concisePrompt, responseLength: 4096 });
         const processedReply = processReply(reply);
@@ -4349,6 +4371,19 @@ async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuit
     const seed = extension_settings.sd.seed >= 0 ? extension_settings.sd.seed : Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
     workflow = workflow.replaceAll('"%seed%"', JSON.stringify(seed));
 
+    // Empty latent text-to-image needs the full noise schedule. The UI value
+    // applies to image-to-image samplers, which start from existing pixels.
+    const graph = JSON.parse(workflow);
+    let fixedEmptyLatent = false;
+    for (const node of Object.values(graph)) {
+        if (node.class_type === 'KSampler' && node.inputs?.denoise === '%denoise%'
+            && graph[node.inputs.latent_image?.[0]]?.class_type === 'EmptyLatentImage') {
+            node.inputs.denoise = 1.0;
+            fixedEmptyLatent = true;
+        }
+    }
+    if (fixedEmptyLatent) workflow = JSON.stringify(graph);
+
     const denoising_strength = extension_settings.sd.denoising_strength === undefined ? (hasReference ? 0.7 : 1.0) : extension_settings.sd.denoising_strength;
     workflow = workflow.replaceAll('"%denoise%"', JSON.stringify(denoising_strength));
 
@@ -4387,6 +4422,7 @@ async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuit
 }
 
 async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath, placeholders, url, imageContinuity) {
+    const boost = imageBoostEnabled(extension_settings.sd);
     const workflow = (await prepareComfyWorkflow(negativePrompt, placeholders, imageContinuity, signal)).replaceAll('"%prompt%"', JSON.stringify(prompt));
     console.log(`{
         "prompt": ${workflow}
@@ -4399,6 +4435,7 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
         signal: signal,
         body: JSON.stringify({
             url,
+            boost,
             prompt: `{
                 "prompt": ${workflow}
             }`,
@@ -5930,6 +5967,10 @@ export async function init() {
 
     const template = await renderExtensionTemplateAsync('stable-diffusion', 'settings', defaultSettings);
     $('#sd_container').append(template);
+    mountImageBoostSettings({ container: document.getElementById('sd_comfy_boost_container'),
+        settings: extension_settings.sd, save: saveSettingsDebounced, request: requestImageDescription });
+    mountImageDescriptionSettings({ container: document.getElementById('sd_description_container'),
+        settings: extension_settings.sd, save: saveSettingsDebounced, request: requestImageDescription });
     $('#sd_source').on('change', onSourceChange);
     $('#sd_scale').on('input', onScaleInput);
     $('#sd_steps').on('input', onStepsInput);

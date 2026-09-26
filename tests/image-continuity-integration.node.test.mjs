@@ -1,8 +1,10 @@
+import { imageBoostEnabled } from '../public/scripts/extensions/stable-diffusion/image-boost-settings.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { imageDescriptionSnapshot } from '../public/scripts/extensions/stable-diffusion/image-description-settings.js';
 import { prepareImageContinuity, collectImageEvidence, IMAGE_CONTEXT_REQUESTED } from '../public/scripts/extensions/stable-diffusion/image-continuity.js';
 
 const source = fs.readFileSync(new URL('../public/scripts/extensions/stable-diffusion/index.js', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
@@ -25,7 +27,7 @@ function fixture({ durable = false, emitOverride, fail = false, switchOnSave = f
     const prompts = Object.fromEntries(Object.values(modes).map(mode => [mode, 'Describe {0}']));
     prompts[-1] = '{{prompt}}';
     const handle = { hide: async () => {} };
-    const globals = {
+    const globals = { performance, imageBoostEnabled, imageDescriptionSnapshot,
         console: { log: noop, warn: noop, trace: noop, error: noop }, Error, AbortController, structuredClone, MODULE_NAME: 'sd',
         generationMode: modes, initiators: { tool: 'tool', command: 'command', swipe: 'swipe' }, sources: { comfy: 'comfy', extras: 'extras' }, comfyTypes: { standard: 'standard' },
         extension_settings: { sd: { source: durable ? 'comfy' : 'extras', comfy_type: 'standard', free_extend: false, multimodal_captioning: false, prompts, comfy_url: 'mock://comfy', prompt_prefix: '', negative_prompt: '' } },
@@ -160,6 +162,7 @@ test('actual durable endpoint success stamps provenance, and failure/cancellatio
         const abort = new AbortController();
         const metadata = { version: 1, sourceKind: 'requested_prompt', appearanceRevision: 'stable-appearance', referenceIds: ['prior'], sceneLocation: 'Garden', contextCharacterIds: ['hero'] };
         const sandbox = vm.createContext({
+            boost: true,
             kind: 'image', chatRequest: undefined, image: { prompt: 'black hair', workflow: '{"text":"%prompt%"}', imageContext: metadata },
             message: { name: 'Narrator', extra: {} }, user: { directories: { userImages: '/synthetic/images', root: '/synthetic' } }, id: 'job',
             processImagePrompt: value => value, path, sanitize: value => value, Buffer, structuredClone,
@@ -179,3 +182,12 @@ test('actual durable endpoint success stamps provenance, and failure/cancellatio
         }
     }
 });
+
+ test('dedicated foreground rejects an empty processed description before image generation', async () => {
+  const f = fixture(); f.sandbox.main_api = 'openai';
+  f.sandbox.extension_settings.sd.image_description = { mode:'dedicated',url:'http://localhost:9998/v1',model:'gemma',context_length:8192,max_tokens:512 };
+  f.sandbox.requestImageDescription = async () => ({ text:'😀' }); f.sandbox.processReply = () => '';
+  let imageCalls = 0; f.sandbox.generateExtrasImage = async () => { imageCalls++; return {data:'pixel',format:'png'}; };
+  await assert.rejects(f.sandbox.generatePicture('tool',{},'Elin portrait'), /유효한 이미지 묘사/);
+  assert.equal(imageCalls,0); assert.equal(f.jobs.length,0);
+ });

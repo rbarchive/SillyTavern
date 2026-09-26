@@ -8,7 +8,7 @@ function hasContext(config, length) {
     return Number.isSafeInteger(config?.context_length) && config.context_length >= length;
 }
 
-function nativeApiUrl(baseUrl) {
+export function lmStudioModelsUrl(baseUrl) {
     const url = new URL(baseUrl);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || !/^\/v1\/?$/.test(url.pathname)) {
         throw new Error('LM Studio context sync requires a Custom endpoint URL ending in /v1.');
@@ -58,6 +58,8 @@ async function ensureLoaded({ apiUrl, model, contextLength, apiKey, fetchImpl, s
         throw new Error('LM Studio has a differently named or additional instance of this model; manage it in LM Studio first.');
     }
     const needsLoad = !hasContext(active?.config, contextLength);
+    // Reusing an already-ready dialogue model must not evict an image model.
+    if (!needsLoad) return;
     const displaced = catalog.models.filter(entry => entry.type === 'llm').flatMap(entry =>
         (entry.loaded_instances || []).filter(instance => entry.key !== model || needsLoad)
             .map(instance => ({ model: entry.key, instance })));
@@ -115,25 +117,53 @@ async function ensureLoaded({ apiUrl, model, contextLength, apiKey, fetchImpl, s
 
 /** @param {{ baseUrl: string, model: string, contextLength: number, apiKey?: string, fetchImpl: Function, signal?: AbortSignal }} options */
 export async function ensureLmStudioContext(options) {
-    const apiUrl = nativeApiUrl(options.baseUrl);
+    const apiUrl = lmStudioModelsUrl(options.baseUrl);
     const contextLength = Number(options.contextLength);
     if (!options.model || !Number.isSafeInteger(contextLength) || contextLength < 512) {
         throw new Error('Select an LM Studio model and a valid ST Context length first.');
     }
-    const key = apiUrl;
+    return withLmStudioModelLock(options.baseUrl, () => ensureLoaded({
+        apiUrl, model: options.model, contextLength, apiKey: options.apiKey,
+        fetchImpl: options.fetchImpl, signal: options.signal,
+    }), options.signal);
+}
+
+/** Protect an image model from this server's model switches until its stream ends. */
+export async function withLmStudioModelLock(baseUrl, action, signal) {
+    const key = lmStudioModelsUrl(baseUrl);
     const previous = pendingLoads.get(key) || Promise.resolve();
-    const current = previous.catch(() => {}).then(() => ensureLoaded({
-        apiUrl,
-        model: options.model,
-        contextLength,
-        apiKey: options.apiKey,
-        fetchImpl: options.fetchImpl,
-        signal: options.signal,
-    }));
+    const current = previous.catch(() => {}).then(() => { signal?.throwIfAborted(); return action(); });
     pendingLoads.set(key, current);
     try {
-        await current;
+        return await current;
     } finally {
         if (pendingLoads.get(key) === current) pendingLoads.delete(key);
     }
+}
+
+/** Add a model without unloading any existing instance; callback holds the lock. */
+export async function withLmStudioImageModel(options, action) {
+    const apiUrl = lmStudioModelsUrl(options.baseUrl);
+    return withLmStudioModelLock(options.baseUrl, async () => {
+        const request = (suffix = '', body) => apiRequest(options.fetchImpl, apiUrl + suffix, undefined, {
+            method: body ? 'POST' : 'GET', signal: options.signal,
+            ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        const getSelected = catalog => {
+            const model = catalog.models?.find(m => m.type === 'llm' && m.key === options.model);
+            if (!model) throw new Error('선택한 이미지 묘사 모델을 LM Studio에서 찾지 못했습니다. 목록을 새로고침해 주세요.');
+            if (options.contextLength > model.max_context_length) throw new Error('설정한 컨텍스트가 선택 모델의 최대 길이를 초과합니다.');
+            return model;
+        };
+        let selected = getSelected(await request());
+        let instance = selected.loaded_instances?.find(i => hasContext(i.config, options.contextLength));
+        if (!instance && selected.loaded_instances?.length) throw new Error('선택 모델의 로드된 컨텍스트가 부족합니다. 컨텍스트 설정을 낮추거나 LM Studio에서 해당 모델만 다시 로드해 주세요.');
+        if (!instance) {
+            await request('/load', { model: options.model, context_length: options.contextLength, echo_load_config: true });
+            selected = getSelected(await request());
+            instance = selected.loaded_instances?.find(i => hasContext(i.config, options.contextLength));
+        }
+        if (!instance?.id) throw new Error('이미지 묘사 모델 로드와 컨텍스트를 확인하지 못했습니다.');
+        return action(instance.id);
+    }, options.signal);
 }

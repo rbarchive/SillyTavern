@@ -17,8 +17,8 @@
     "class_type": "CLIPTextEncode",
     "inputs": {
       "clip": [
-        "4",
-        1
+        "10",
+        0
       ],
       "text": "%prompt%"
     }
@@ -27,8 +27,8 @@
     "class_type": "CLIPTextEncode",
     "inputs": {
       "clip": [
-        "4",
-        1
+        "10",
+        0
       ],
       "text": "%negative_prompt%"
     }
@@ -57,7 +57,7 @@
         "5",
         0
       ],
-      "denoise": 1
+      "denoise": "%denoise%"
     }
   },
   "8": {
@@ -81,6 +81,16 @@
         0
       ],
       "filename_prefix": "SillyTavern_Quality"
+    }
+  },
+  "10": {
+    "class_type": "CLIPSetLastLayer",
+    "inputs": {
+      "clip": [
+        "4",
+        1
+      ],
+      "stop_at_clip_layer": "%clip_skip%"
     }
   }
 }

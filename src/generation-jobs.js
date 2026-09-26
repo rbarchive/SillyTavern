@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
 const active = new Map();
+const previews = new Map();
 const MAX_RUNNING = 4;
 const MAX_RECORDS = 200;
 const hash = value => {
@@ -51,7 +52,9 @@ function atomic(file, value) {
 }
 function save(file, job) {
     job.updatedAt = new Date().toISOString();
-    atomic(file, JSON.stringify(job));
+    const persisted = { ...job };
+    delete persisted.preview;
+    atomic(file, JSON.stringify(persisted));
 }
 function readChat(file) {
     return fs.readFileSync(file, 'utf8').split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
@@ -84,7 +87,7 @@ function load(file) {
         else job.error = 'Server restarted before generation finished. Retry with a new job ID.';
         save(file, job);
     }
-    return job;
+    return previews.has(file) ? { ...job, preview: previews.get(file) } : job;
 }
 
 /** Returns a persisted job, or null. Never starts a provider request. */
@@ -101,7 +104,7 @@ export async function listJobs(user) {
  * runner({signal, update}) returns {message, result}; update accepts JSON progress.
  * message is the full final chat message. result is provider output for retrieval.
  */
-export async function acceptJob(user, { id, origin, operation = 'append', message }, runner) {
+export async function acceptJob(user, { id, origin, operation = 'append', message, imageBoost }, runner) {
     const file = recordPath(user, id);
     const existing = load(file);
     if (existing) {
@@ -128,7 +131,7 @@ export async function acceptJob(user, { id, origin, operation = 'append', messag
     if (!origin.group && !integrity) fail('Save the original chat with integrity metadata before generating.', 'origin_conflict');
     if (origin.integrity && origin.integrity !== integrity) fail('Original chat identity changed.', 'origin_conflict');
     if (!snapshot.length || (operation !== 'append' && snapshot.length < (origin.group ? 1 : 2))) fail('Original message is unavailable.', 'origin_conflict');
-    const job = { id, origin: copy(origin), operation, status: 'queued', createdAt: new Date().toISOString(), integrity,
+    const job = { id, origin: copy(origin), operation, ...(typeof imageBoost === 'boolean' ? { imageBoost } : {}), status: 'queued', createdAt: new Date().toISOString(), integrity,
         anchor: snapshot.map(hash), targetIndex: snapshot.length - 1, relativeChat: path.relative(scope(user).root, target) };
     save(file, job);
     const controller = new AbortController();
@@ -142,10 +145,18 @@ export async function acceptJob(user, { id, origin, operation = 'append', messag
             save(file, job);
             const output = await runner({ signal: controller.signal, update: progress => {
                 if (!controller.signal.aborted && !terminal.has(job.status)) {
-                    // Restrict persisted progress to harmless structural state.
-                    job.progress = { phase: String(progress?.phase ?? '').slice(0, 80), received: Number(progress?.received) || 0 };
+                    // Preview stays in memory; never persist partial dialogue or write per token.
+                    if (typeof progress?.preview === 'string') previews.set(file, progress.preview.slice(-32000));
+                    job.progress = { ...job.progress, phase: String(progress?.phase ?? job.progress?.phase ?? '').slice(0, 80), received: Number(progress?.received) || job.progress?.received || 0 };
                     if (typeof progress?.promptId === 'string' && /^[a-zA-Z0-9_-]{1,200}$/u.test(progress.promptId)) job.progress.promptId = progress.promptId;
-                    save(file, job);
+                    if (['modelPreparation', 'modelRequest', 'firstToken', 'firstVisible', 'modelComplete', 'drawing', 'comfySubmitted', 'imageReceived', 'imageSaved'].includes(progress?.event)) {
+                        job.timings ??= {};
+                        job.timings[progress.event] ??= Date.now() - Date.parse(job.createdAt);
+                    }
+                    if (progress?.modelStats) {
+                        job.modelStats = Object.fromEntries(['inputTokens', 'outputTokens', 'reasoningTokens'].filter(key => Number.isSafeInteger(progress.modelStats[key]) && progress.modelStats[key] >= 0).map(key => [key, progress.modelStats[key]]));
+                    }
+                    if (progress?.event || progress?.phase || progress?.promptId) save(file, job);
                 }
             } });
             if (controller.signal.aborted) return;
@@ -177,6 +188,7 @@ export async function acceptJob(user, { id, origin, operation = 'append', messag
                 atomic(target, current.map(row => JSON.stringify(row)).join('\n'));
                 job.status = 'completed';
             }
+            job.timings = { ...job.timings, committed: Date.now() - Date.parse(job.createdAt) };
             save(file, job);
         } catch (error) {
             if (!controller.signal.aborted) {
@@ -186,6 +198,7 @@ export async function acceptJob(user, { id, origin, operation = 'append', messag
             }
         } finally {
             active.delete(file);
+            previews.delete(file);
         }
     })().catch(error => console.error('Could not persist generation job status:', error));
     return copy(job);

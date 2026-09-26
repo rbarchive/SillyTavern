@@ -7420,7 +7420,7 @@ export function saveChatDebounced() {
  *
  * @returns {Promise<void>}
  */
-export async function saveChat({ chatName, withMetadata, mesId, force = false, chatData = undefined } = {}) {
+export async function saveChat({ chatName, withMetadata, mesId, force = false, chatData = undefined, throwOnError = false } = {}) {
     if (selected_group) {
         toastr.error(t`Operation was aborted to prevent data corruption.`, t`saveChat called for a group chat`);
         throw new Error('saveChat called for a group chat');
@@ -7500,10 +7500,11 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
             return;
         }
 
-        await saveChat({ chatName, withMetadata, mesId, force: true });
+        await saveChat({ chatName, withMetadata, mesId, force: true, throwOnError });
     } catch (error) {
         console.error(error);
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
+        if (throwOnError) throw error;
     }
 }
 
@@ -9437,14 +9438,19 @@ export async function saveMetadata() {
     return await saveChatConditional();
 }
 
-export async function saveChatConditional() {
+export async function saveChatConditional({ throwOnError = false, expectedOrigin = undefined } = {}) {
     try {
         await waitUntilCondition(() => !isChatSaving, DEFAULT_SAVE_EDIT_TIMEOUT, 100);
     } catch {
         console.warn('Timeout waiting for chat to save');
+        if (throwOnError) throw new Error('Timeout waiting for chat to save');
         return;
     }
 
+    if (expectedOrigin && (expectedOrigin.group ? selected_group !== expectedOrigin.group
+        : selected_group || characters[this_chid]?.avatar !== expectedOrigin.avatar || characters[this_chid]?.chat !== expectedOrigin.file || chat_metadata.integrity !== expectedOrigin.integrity)) {
+        throw new Error('Chat changed before saving generation processing');
+    }
     try {
         cancelDebouncedChatSave();
 
@@ -9453,7 +9459,7 @@ export async function saveChatConditional() {
         if (selected_group) {
             await saveGroupChat(selected_group, true);
         } else {
-            await saveChat();
+            await saveChat({ throwOnError });
         }
 
         // Save token and prompts cache to IndexedDB storage
@@ -9461,6 +9467,7 @@ export async function saveChatConditional() {
         saveItemizedPrompts(getCurrentChatId());
     } catch (error) {
         console.error('Error saving chat', error);
+        if (throwOnError) throw error;
     } finally {
         isChatSaving = false;
     }
@@ -12628,15 +12635,52 @@ jQuery(async function () {
 
 initializeGenerationJobs();
 
+/** Refresh authoritative rows without navigating/reloading the character and RP menus. */
+export async function loadGenerationJobResult(job) {
+    const origin = job.origin;
+    if (origin.group) {
+        if (selected_group !== origin.group || isChatSaving || this_edit_mes_id >= 0) return false;
+        await reloadCurrentChat();
+        return selected_group === origin.group;
+    }
+    const matches = () => !selected_group && characters[this_chid]?.avatar === origin.avatar
+        && characters[this_chid]?.chat === origin.file && chat_metadata.integrity === origin.integrity;
+    if (!matches() || isChatSaving || this_edit_mes_id >= 0) return false;
+    const element = document.getElementById('chat');
+    const atBottom = element && element.scrollHeight - element.scrollTop - element.clientHeight < 150;
+    const before = JSON.stringify(chat);
+    const metadata = JSON.stringify(chat_metadata);
+    const response = await fetch('/api/chats/get', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({
+        ch_name: characters[this_chid].name, file_name: origin.file, avatar_url: origin.avatar,
+    }) });
+    if (!response.ok) throw new Error('Generated chat could not be loaded');
+    const data = await response.json();
+    if (!matches() || isChatSaving || this_edit_mes_id >= 0 || before !== JSON.stringify(chat) || metadata !== JSON.stringify(chat_metadata)) return false;
+    if (!Array.isArray(data) || data[0]?.chat_metadata?.integrity !== origin.integrity) throw new Error('Generated chat identity changed');
+    const header = data.shift();
+    data.forEach(ensureMessageMediaIsArray);
+    let first = 0;
+    while (first < chat.length && first < data.length && JSON.stringify(chat[first]) === JSON.stringify(data[first])) first++;
+    chat_metadata = header.chat_metadata;
+    chat.splice(0, chat.length, ...data);
+    if (first < chat.length || first < JSON.parse(before).length) await redisplayChat({ startIndex: first, fade: false });
+    if (atBottom) element.scrollTop = element.scrollHeight;
+    return true;
+}
+
 /** Apply browser extension processing once when a server completion is observed. */
 export async function applyGenerationJobResult(job, type = 'normal') {
     const messageId = chat.findIndex(message => message.extra?.generation_job === job.id);
-    if (messageId < 0 || chat[messageId].extra.generation_job_processed) return;
+    if (messageId < 0 || chat[messageId].extra.generation_job_processed) return true;
+    const message = chat[messageId];
     const image = !!job.result?.path;
     if (!image) chat[messageId].mes = cleanUpMessage({ getMessage: chat[messageId].mes, isImpersonate: false, isContinue: type === 'continue', displayIncompleteSentences: false });
-    chat[messageId].extra.generation_job_processed = true;
-    await redisplayChat({ startIndex: messageId, fade: false });
+    if (!image) updateMessageElement(chat[messageId], { messageId, messageElement: $(`#chat .mes[mesid="${messageId}"]`) });
     await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, image ? 'extension' : type);
+    if (chat[messageId] !== message) return false;
     await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, image ? 'extension' : type);
-    await saveChatConditional();
+    if (chat[messageId] !== message) return false;
+    message.extra.generation_job_processed = true;
+    try { await saveChatConditional({ throwOnError: true, expectedOrigin: job.origin }); } catch (error) { delete message.extra.generation_job_processed; throw error; }
+    return true;
 }

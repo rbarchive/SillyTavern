@@ -7,12 +7,13 @@ test('switches between installed model families without changing image content o
     const cases = [
         ['z_image_bf16.safetensors', 'Local_ZImage_Base.json', 40, 4, 'res_multistep', 'simple'],
         ['sd_xl_turbo_1.0_fp16.safetensors', 'Local_SDXL_Turbo_Selectable.json', 4, 1, 'euler_ancestral', 'sgm_uniform'],
-        ['Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors', 'Local_Juggernaut_XL_Quality.json', 35, 5, 'dpmpp_2m', 'karras'],
+        ['Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors', 'Local_Juggernaut_XL_Quality.json', 24, 5, 'dpmpp_2m', 'karras'],
     ];
     for (const [model, workflow, steps, cfg, sampler, scheduler] of cases) {
         settings.model = model;
         assert.equal(applyLocalImageModel(settings), true);
         assert.deepEqual([settings.comfy_workflow, settings.steps, settings.scale, settings.sampler, settings.scheduler], [workflow, steps, cfg, sampler, scheduler]);
+        if (model.startsWith('Juggernaut')) assert.equal(settings.denoising_strength, 1);
         assert.deepEqual([settings.width, settings.height, settings.prompt_prefix, settings.negative_prompt, settings.character_prompts], [1280,720,'watercolor','blur',{hero:'coat'}]);
     }
 });

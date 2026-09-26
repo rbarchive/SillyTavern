@@ -39,6 +39,7 @@
                 <input id="sd_minimal_prompt_processing" type="checkbox" />
                 <span data-i18n="sd_minimal_prompt_processing_txt">Minimal response prompt processing</span>
             </label>
+            <div id="sd_description_container"></div>
             <label for="sd_source" data-i18n="Source">Source</label>
             <select id="sd_source" class="text_pole">
                 <option value="aimlapi">AI/ML API</option>
@@ -232,6 +233,7 @@
                     <option value="runpod_serverless">RunPod Serverless Endpoint</option>
                 </select>
                 <div data-sd-comfy-type="standard">
+                    <div id="sd_comfy_boost_container" class="image-boost-settings"></div>
                     <label for="sd_comfy_url">ComfyUI URL</label>
                     <div class="flex-container flexnowrap">
                         <input id="sd_comfy_url" type="text" class="text_pole" data-i18n="[placeholder]sd_comfy_url" placeholder="Example: {{comfy_url}}" value="{{comfy_url}}" />
@@ -512,6 +514,7 @@
                     <small>
                         <span data-i18n="Denoising strength">Denoising strength</span>
                     </small>
+                    <small data-sd-source="comfy">참조 이미지의 변형 강도입니다. 새 그림은 생성 강도 1.0을 사용합니다.</small>
                     <input class="neo-range-slider" type="range" id="sd_denoising_strength" name="sd_denoising_strength" min="{{denoising_strength_min}}" max="{{denoising_strength_max}}" step="{{denoising_strength_step}}" value="{{denoising_strength}}" >
                     <input class="neo-range-input" type="number" id="sd_denoising_strength_value" data-for="sd_denoising_strength" min="{{denoising_strength_min}}" max="{{denoising_strength_max}}" step="{{denoising_strength_step}}" value="{{denoising_strength}}" >
                 </div>

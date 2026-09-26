@@ -133,3 +133,16 @@ test('observed completion can be edited, deleted and regenerated; stale revision
     assert.equal(replaced.at(-1).extra.generation_job_processed, undefined);
     assert.equal(protectJobResults(f.file, deleted).at(-1).mes, 'replacement');
 });
+
+test('cancelling live preview never persists partial dialogue in receipt or chat', async t => {
+    const f = fixture(t); const gate = deferred();
+    await acceptJob(f.user, { id: 'preview-cancel', origin: f.origin }, async ({ update }) => {
+        update({ phase: 'dialogue', preview: 'partial private text', received: 20 });
+        await gate.promise; return output;
+    });
+    assert.equal((await getJob(f.user, 'preview-cancel')).preview, 'partial private text');
+    await cancelJob(f.user, 'preview-cancel');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.user.directories.root, 'generation-jobs/preview-cancel.json'))).preview, undefined);
+    assert.equal(fs.readFileSync(f.file, 'utf8').split('\n').length, 2);
+    gate.resolve();
+});

@@ -1,7 +1,7 @@
 /** Compatible workflows and generation defaults for the installed local models. */
 const localImageModels = {
     'Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors': {
-        comfy_workflow: 'Local_Juggernaut_XL_Quality.json', steps: 35, scale: 5,
+        comfy_workflow: 'Local_Juggernaut_XL_Quality.json', steps: 24, scale: 5, clip_skip: 1, denoising_strength: 1.0,
         sampler: 'dpmpp_2m', scheduler: 'karras',
     },
     'z_image_bf16.safetensors': {

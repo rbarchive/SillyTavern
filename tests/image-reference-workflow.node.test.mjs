@@ -1,3 +1,4 @@
+import { imageBoostEnabled } from '../public/scripts/extensions/stable-diffusion/image-boost-settings.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
@@ -29,7 +30,7 @@ function fixture({ workflow = referenceWorkflow, responseOk = true, mime = 'imag
     const calls = [], jobs = [], descriptionRequests = [];
     let current = 'original';
     const context = { chatId: current, name2: 'Hero', saveChat: async () => {} };
-    const globals = {
+    const globals = { performance, imageBoostEnabled,
         extension_settings: { sd: { comfy_workflow: 'Local_Reference_Image_Continuity.json', seed: 1, model: 'installed.safetensors', sampler: 'dpmpp_2m', scheduler: 'karras', steps: 35, scale: 5, width: 1280, height: 720, prompt_prefix: '', negative_prompt: '', prompts: {}, comfy_url: 'mock://comfy' } },
         getCurrentChatId: () => current, generationOrigin: () => ({ ...origin, file: current }), getContext: () => context,
         getRequestHeaders: () => ({}), collectImageEvidence, applyReferenceImage, prepareImageContinuity,
@@ -152,9 +153,11 @@ test('actual foreground and durable builders use the same workflow parameter and
             await f.sandbox.generateBackgroundImage(11, 'picture', undefined, 'Describe canonical black hair', '', 'Hero', 'tool', signal, { update: noop }, c);
             assert.equal(JSON.parse(f.jobs[0].image.workflow)['10'].inputs.image, 'cGl4ZWw=');
             assert.equal(f.jobs[0].image.imageContext.referenceIds.length, 2);
+            assert.equal(f.jobs[0].image.boost, true);
         } else {
             await f.sandbox.generateComfyImage('black hair', '', signal, c);
             const payload = JSON.parse(f.calls.at(-1).options.body);
+            assert.equal(payload.boost, true);
             assert.equal(JSON.parse(payload.prompt).prompt['10'].inputs.image, 'cGl4ZWw=');
         }
         const switched = fixture({ switchOnImage: true });
@@ -187,4 +190,15 @@ test('opt-in registry has exactly one workflow and existing default selection an
     assert.equal(settings.model, 'Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors');
     assert.deepEqual(JSON.parse(qualityWorkflow)['3'].inputs.latent_image, ['5', 0]);
     assert.ok(!qualityWorkflow.includes('%reference_image%'));
+});
+
+test('text-to-image empty latent uses full denoise while reference samplers preserve configured strength', async () => {
+    const f = fixture({ workflow: qualityWorkflow });
+    f.sandbox.extension_settings.sd.denoising_strength = 0.4;
+    const graph = JSON.parse(await f.sandbox.prepareComfyWorkflow('', placeholders, continuity()));
+    assert.equal(graph['3'].inputs.denoise, 1);
+    assert.equal(graph['5'].class_type, 'EmptyLatentImage');
+    const ref = fixture(); ref.sandbox.extension_settings.sd.denoising_strength = 0.4;
+    const refGraph = JSON.parse(await ref.sandbox.prepareComfyWorkflow('', placeholders, continuity()));
+    assert.equal(refGraph['3'].inputs.denoise, 0.4);
 });

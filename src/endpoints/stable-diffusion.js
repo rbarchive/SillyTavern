@@ -13,6 +13,7 @@ import { delay, getBasicAuthHeader, isValidUrl, tryParse } from '../util.js';
 import { readSecret, SECRET_KEYS } from './secrets.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { AIMLAPI_HEADERS } from '../constants.js';
+import { router as boostRouter, getLocalImageRuntime } from './local-image-runtime.js';
 
 /**
  * Gets the comfy workflows.
@@ -383,6 +384,7 @@ router.post('/sd-next/upscalers', async (request, response) => {
 });
 
 const comfy = express.Router();
+comfy.use('/boost', boostRouter);
 
 comfy.post('/ping', async (request, response) => {
     try {
@@ -561,6 +563,11 @@ comfy.post('/rename-workflow', getFileNameValidationFunction('old_name'), getFil
 
 /** Execute a Comfy job independently of a browser connection. */
 export async function runComfyGeneration(body, signal, onSubmitted = () => {}) {
+    return getLocalImageRuntime().run(body.url, body.boost, signal,
+        (url, ownedSignal) => executeComfyGeneration({ ...body, url }, ownedSignal, onSubmitted));
+}
+
+async function executeComfyGeneration(body, signal, onSubmitted = () => {}) {
         let item;
         const url = new URL(urlJoin(body.url, '/prompt'));
         const promptResult = await fetch(url, {
@@ -626,6 +633,11 @@ export async function runComfyGeneration(body, signal, onSubmitted = () => {}) {
 
 comfy.post('/generate', async (request, response) => {
     try {
+        if (getLocalImageRuntime().supports(request.body.url)) {
+            const output = await runComfyGeneration(request.body);
+            if (!response.destroyed) response.send(output);
+            return;
+        }
         let item;
         const url = new URL(urlJoin(request.body.url, '/prompt'));
 
