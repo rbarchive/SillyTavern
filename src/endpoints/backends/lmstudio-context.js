@@ -4,6 +4,10 @@
  */
 const pendingLoads = new Map();
 
+function hasContext(config, length) {
+    return Number.isSafeInteger(config?.context_length) && config.context_length >= length;
+}
+
 function nativeApiUrl(baseUrl) {
     const url = new URL(baseUrl);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || !/^\/v1\/?$/.test(url.pathname)) {
@@ -53,7 +57,7 @@ async function ensureLoaded({ apiUrl, model, contextLength, apiKey, fetchImpl, s
     if (instances.length > 1 || (instances.length && !active)) {
         throw new Error('LM Studio has a differently named or additional instance of this model; manage it in LM Studio first.');
     }
-    const needsLoad = !(active?.config?.context_length >= contextLength);
+    const needsLoad = !hasContext(active?.config, contextLength);
     const displaced = catalog.models.filter(entry => entry.type === 'llm').flatMap(entry =>
         (entry.loaded_instances || []).filter(instance => entry.key !== model || needsLoad)
             .map(instance => ({ model: entry.key, instance })));
@@ -80,8 +84,8 @@ async function ensureLoaded({ apiUrl, model, contextLength, apiKey, fetchImpl, s
         if (!needsLoad) return;
         loadAttempted = true;
         const loaded = await request('/load', loadSettings(model, active?.config, contextLength));
-        if (loaded.status !== 'loaded' || loaded.load_config?.context_length !== contextLength) {
-            throw new Error('LM Studio did not confirm the requested context length.');
+        if (loaded.status !== 'loaded' || !hasContext(loaded.load_config, contextLength)) {
+            throw new Error(`LM Studio did not confirm the requested context length (requested ${contextLength}, reported ${loaded.load_config?.context_length ?? 'unknown'}).`);
         }
     } catch (error) {
         const recoveryErrors = [];
@@ -97,7 +101,7 @@ async function ensureLoaded({ apiUrl, model, contextLength, apiKey, fetchImpl, s
         for (const entry of unloaded) {
             try {
                 const restored = await request('/load', loadSettings(entry.model, entry.instance.config, entry.instance.config.context_length), null);
-                if (restored.status !== 'loaded' || restored.load_config?.context_length !== entry.instance.config.context_length) {
+                if (restored.status !== 'loaded' || !hasContext(restored.load_config, entry.instance.config.context_length)) {
                     throw new Error(`Could not confirm restored model "${entry.model}".`);
                 }
             } catch (restoreError) { recoveryErrors.push(restoreError.message); }
