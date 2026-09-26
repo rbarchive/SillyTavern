@@ -2,6 +2,7 @@ import { runGenerationJob, generationOrigin } from '../../generation-jobs.js';
 import { applyLocalImagePreset } from './local-image-preset.js';
 import { applyLocalImageModel } from './local-image-models.js';
 import { beginImageGenerationStatus } from './image-generation-status.js';
+import { prepareImageContinuity, collectImageEvidence, applyReferenceImage } from './image-continuity.js';
 import { Popper } from '../../../lib.js';
 import {
     animation_duration,
@@ -2874,7 +2875,7 @@ async function loadComfyWorkflows() {
     }
 }
 
-function getGenerationType(prompt) {
+function getGenerationType(prompt, initiator) {
     let mode = generationMode.FREE;
 
     for (const [key, values] of Object.entries(triggerWords)) {
@@ -2890,7 +2891,7 @@ function getGenerationType(prompt) {
         mode = multimodalMap[mode];
     }
 
-    if (mode === generationMode.FREE && extension_settings.sd.free_extend) {
+    if (mode === generationMode.FREE && (extension_settings.sd.free_extend || initiator === initiators.tool)) {
         mode = generationMode.FREE_EXTENDED;
     }
 
@@ -3023,12 +3024,14 @@ async function generatePicture(initiator, args, trigger, message, callback) {
     ensureSelectionExists('model', '#sd_model');
 
     trigger = trigger.trim();
-    const generationType = getGenerationType(trigger);
+    const generationType = getGenerationType(trigger, initiator);
     const generationTypeKey = Object.keys(generationMode).find(key => generationMode[key] === generationType);
     console.log(`Image generation mode ${generationTypeKey} triggered with "${trigger}"`);
 
-    const quietPrompt = getQuietPrompt(generationType, trigger);
+    let quietPrompt = getQuietPrompt(generationType, trigger);
     const context = getContext();
+    const imageOrigin = { chatId: getCurrentChatId(), origin: structuredClone(generationOrigin()), evidence: collectImageEvidence(context.chat), currentRequest: trigger };
+    let imageContinuity = imageOrigin;
 
     let characterName = context.groupId
         ? context.groups[Object.keys(context.groups).filter(x => context.groups[x].id === context.groupId)[0]]?.id?.toString()
@@ -3036,14 +3039,14 @@ async function generatePicture(initiator, args, trigger, message, callback) {
 
     if (generationType === generationMode.BACKGROUND) {
         const callbackOriginal = callback;
-        callback = async function (prompt, imagePath, generationType, _negativePromptPrefix, _initiator, prefixedPrompt, format) {
+        callback = async function (prompt, imagePath, generationType, _negativePromptPrefix, _initiator, prefixedPrompt, format, continuity) {
             const imgUrl = `url("${encodeURI(imagePath)}")`;
             await eventSource.emit(event_types.FORCE_SET_BACKGROUND, { url: imgUrl, path: imagePath });
 
             if (typeof callbackOriginal === 'function') {
-                await callbackOriginal(prompt, imagePath, generationType, negativePromptPrefix, initiator, prefixedPrompt, format);
+                await callbackOriginal(prompt, imagePath, generationType, negativePromptPrefix, initiator, prefixedPrompt, format, continuity);
             } else {
-                await sendMessage(prompt, imagePath, generationType, negativePromptPrefix, initiator, prefixedPrompt, format);
+                await sendMessage(prompt, imagePath, generationType, negativePromptPrefix, initiator, prefixedPrompt, format, continuity);
             }
         };
     }
@@ -3067,13 +3070,22 @@ async function generatePicture(initiator, args, trigger, message, callback) {
     const generationStatus = beginImageGenerationStatus();
 
     try {
+        if ([generationMode.CHARACTER, generationMode.USER, generationMode.SCENARIO, generationMode.NOW,
+            generationMode.FACE, generationMode.BACKGROUND, generationMode.FREE_EXTENDED].includes(generationType)) {
+            imageContinuity = await prepareImageContinuity({ ...imageOrigin, chat: context.chat, currentRequest: trigger, appearanceContextApplied: true,
+                emit: (event, payload) => eventSource.emit(event, payload),
+                isCurrent: (chatId, origin) => getCurrentChatId() === chatId && JSON.stringify(generationOrigin()) === JSON.stringify(origin),
+            });
+            quietPrompt += `\n\n${imageContinuity.instruction}`;
+        }
+        assertImageGenerationOrigin(imageContinuity);
         if (!selected_group && extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type === comfyTypes.standard && main_api === 'openai' && oai_settings.chat_completion_source === 'custom'
             && !callback && !extension_settings.sd.refine_mode && generationType !== generationMode.BACKGROUND
             && ![generationMode.FACE_MULTIMODAL, generationMode.CHARACTER_MULTIMODAL, generationMode.USER_MULTIMODAL].includes(generationType)) {
             args?._abortController?.addEventListener('abort', stopListener, { once: true });
             loaderHandle = loader.show({ blocking: false, slug: `${MODULE_NAME}-image-generation`, title: t`Image Generation`,
                 message: '서버에서 이미지 생성 중 · 화면을 바꿔도 계속 처리됩니다', onStop: stopListener });
-            return await generateBackgroundImage(generationType, trigger, message, quietPrompt, negativePromptPrefix, characterName, initiator, abortController.signal, generationStatus);
+            return await generateBackgroundImage(generationType, trigger, message, quietPrompt, negativePromptPrefix, characterName, initiator, abortController.signal, generationStatus, imageContinuity);
         }
 
         const combineNegatives = (prefix) => { negativePromptPrefix = combinePrefixes(negativePromptPrefix, prefix); };
@@ -3103,7 +3115,8 @@ async function generatePicture(initiator, args, trigger, message, callback) {
         generationStatus.update(t`Image generation: drawing image…`);
 
         // generate the image
-        imagePath = await sendGenerationRequest(generationType, prompt, negativePromptPrefix, characterName, callback, initiator, abortController.signal);
+        assertImageGenerationOrigin(imageContinuity);
+        imagePath = await sendGenerationRequest(generationType, prompt, negativePromptPrefix, characterName, callback, initiator, abortController.signal, imageContinuity);
     } catch (err) {
         // Check if this was an intentional abort by user
         if (abortController.signal.aborted) {
@@ -3329,9 +3342,16 @@ function imageDescriptionInstruction(quietPrompt) {
     return `${quietPrompt}\n\nReturn only a compact English image prompt with visual tags. Use the described subject and established scene facts. Do not discuss these instructions, prefixes, or who the user/assistant is. Omit any empty character prefix. No explanation, dialogue, or story continuation. /no_think`;
 }
 
-async function generateBackgroundImage(generationType, trigger, message, quietPrompt, negative, folder, initiator, signal, status) {
+function assertImageGenerationOrigin(snapshot) {
+    if (snapshot && (snapshot.chatId !== getCurrentChatId() || JSON.stringify(snapshot.origin) !== JSON.stringify(generationOrigin()))) {
+        throw new Error('The image generation chat changed. Please retry from the intended chat.');
+    }
+}
+
+async function generateBackgroundImage(generationType, trigger, message, quietPrompt, negative, folder, initiator, signal, status, imageContinuity) {
     const context = getContext();
-    const origin = generationOrigin();
+    const origin = imageContinuity?.origin || generationOrigin();
+    assertImageGenerationOrigin(imageContinuity);
     let prompt;
     let chatRequest;
     if (generationType === generationMode.FREE) prompt = generateFreeModePrompt(trigger, prefix => { negative = combinePrefixes(negative, prefix); });
@@ -3344,15 +3364,16 @@ async function generateBackgroundImage(generationType, trigger, message, quietPr
     const skip = [generationMode.FREE, generationMode.BACKGROUND, generationMode.USER, generationMode.FREE_EXTENDED].includes(generationType);
     const prefix = substituteParams(skip ? extension_settings.sd.prompt_prefix : combinePrefixes(extension_settings.sd.prompt_prefix, getCharacterPrefix()));
     const negativePrompt = substituteParams(combinePrefixes(negative, skip ? extension_settings.sd.negative_prompt : combinePrefixes(extension_settings.sd.negative_prompt, getCharacterNegativePrefix())));
-    const workflow = await prepareComfyWorkflow(negativePrompt, ['model', 'vae', 'sampler', 'scheduler', 'steps', 'scale', 'width', 'height']);
+    const workflow = await prepareComfyWorkflow(negativePrompt, ['model', 'vae', 'sampler', 'scheduler', 'steps', 'scale', 'width', 'height'], imageContinuity, signal);
     // Save the origin before acceptance; every later stage runs on the server.
     if (JSON.stringify(origin) !== JSON.stringify(generationOrigin())) throw new Error('요청 준비 중 이야기가 변경되었습니다. 다시 실행해 주세요.');
     await context.saveChat();
+    assertImageGenerationOrigin(imageContinuity);
     const name = context.groupId ? systemUserName : context.name2;
     const messageTemplate = substituteParamsExtended(extension_settings.sd.prompts[generationMode.MESSAGE] || '{{prompt}}', { char: name, prompt: '{{prompt}}', prefixedPrompt: '{{prefixedPrompt}}' });
     const job = await runGenerationJob({ kind: 'image', origin, operation: 'append', chatRequest,
         image: { workflow, url: extension_settings.sd.comfy_url, prefix, negative: negativePrompt, prompt, folder,
-            minimal: extension_settings.sd.minimal_prompt_processing, generationType, messageTemplate },
+            minimal: extension_settings.sd.minimal_prompt_processing, generationType, messageTemplate, imageContext: imageContinuity?.provenance },
         message: { name, is_user: false, is_system: !getVisibilityByInitiator(initiator), send_date: getMessageTimeStamp(), mes: '', extra: {} },
     }, signal, job => status.update(job.progress?.phase === 'drawing' ? t`Image generation: drawing image…` : t`Preparing image description with the chat model…`));
     return job.result.path;
@@ -3384,7 +3405,9 @@ async function generatePrompt(quietPrompt) {
  * @param {AbortSignal} signal Abort signal to cancel the request
  * @returns
  */
-async function sendGenerationRequest(generationType, prompt, additionalNegativePrefix, characterName, callback, initiator, signal) {
+async function sendGenerationRequest(generationType, prompt, additionalNegativePrefix, characterName, callback, initiator, signal, imageContinuity) {
+    imageContinuity ||= { chatId: getCurrentChatId(), origin: structuredClone(generationOrigin()), evidence: collectImageEvidence(getContext().chat), currentRequest: prompt };
+    assertImageGenerationOrigin(imageContinuity);
     const noCharPrefix = [generationMode.FREE, generationMode.BACKGROUND, generationMode.USER, generationMode.USER_MULTIMODAL, generationMode.FREE_EXTENDED];
     const isCharChat = this_chid !== undefined && !selected_group;
     const ignoreNoCharForSwipe = initiator === initiators.swipe && isCharChat;
@@ -3437,10 +3460,10 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
             case sources.comfy:
                 switch (extension_settings.sd.comfy_type) {
                     case comfyTypes.runpod_serverless:
-                        result = await generateComfyRunPodImage(prefixedPrompt, negativePrompt, signal);
+                        result = await generateComfyRunPodImage(prefixedPrompt, negativePrompt, signal, imageContinuity);
                         break;
                     case comfyTypes.standard:
-                        result = await generateComfyImage(prefixedPrompt, negativePrompt, signal);
+                        result = await generateComfyImage(prefixedPrompt, negativePrompt, signal, imageContinuity);
                         break;
                     default:
                         throw new Error('Unknown comfyUI server type.');
@@ -3512,11 +3535,15 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
         return;
     }
 
+    signal?.throwIfAborted();
+    assertImageGenerationOrigin(imageContinuity);
     const filename = characterName ? `${characterName}_${humanizedDateTime()}` : humanizedDateTime();
     const base64Image = await saveBase64AsFile(result.data, characterName, filename, result.format);
+    signal?.throwIfAborted();
+    assertImageGenerationOrigin(imageContinuity);
     callback
-        ? await callback(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format)
-        : await sendMessage(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format);
+        ? await callback(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format, imageContinuity)
+        : await sendMessage(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format, imageContinuity);
     return base64Image;
 }
 
@@ -4288,25 +4315,41 @@ async function generateAimlapiImage(prompt, signal) {
  * @param {string} url - The url of the service to call. Passed to ST server.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function prepareComfyWorkflow(negativePrompt, placeholders) {
+async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuity, signal) {
     const workflowResponse = await fetch('/api/sd/comfy/workflow', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({
             file_name: extension_settings.sd.comfy_workflow,
         }),
+        signal,
     });
     if (!workflowResponse.ok) {
         const text = await workflowResponse.text();
         toastr.error(`Failed to load workflow.\n\n${text}`);
     }
     let workflow = (await workflowResponse.json());
+    const hasReference = workflow.includes('"%reference_image%"');
+    if (hasReference) {
+        imageContinuity ||= { chatId: getCurrentChatId(), origin: structuredClone(generationOrigin()), evidence: collectImageEvidence(getContext().chat) };
+        if (!imageContinuity.contextResolved) {
+            const resolved = await prepareImageContinuity({ ...imageContinuity,
+                emit: (event, payload) => eventSource.emit(event, payload),
+                isCurrent: (chatId, origin) => getCurrentChatId() === chatId && JSON.stringify(generationOrigin()) === JSON.stringify(origin),
+            });
+            Object.assign(imageContinuity, resolved);
+        }
+        workflow = await applyReferenceImage(workflow, imageContinuity, {
+            fetchImage: (url, options) => fetch(url, options), toBase64: getBase64Async, signal,
+            assertCurrent: () => assertImageGenerationOrigin(imageContinuity),
+        });
+    }
     workflow = workflow.replaceAll('"%negative_prompt%"', JSON.stringify(negativePrompt));
 
     const seed = extension_settings.sd.seed >= 0 ? extension_settings.sd.seed : Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
     workflow = workflow.replaceAll('"%seed%"', JSON.stringify(seed));
 
-    const denoising_strength = extension_settings.sd.denoising_strength === undefined ? 1.0 : extension_settings.sd.denoising_strength;
+    const denoising_strength = extension_settings.sd.denoising_strength === undefined ? (hasReference ? 0.7 : 1.0) : extension_settings.sd.denoising_strength;
     workflow = workflow.replaceAll('"%denoise%"', JSON.stringify(denoising_strength));
 
     const clip_skip = isNaN(extension_settings.sd.clip_skip) ? -1 : -extension_settings.sd.clip_skip;
@@ -4343,11 +4386,13 @@ async function prepareComfyWorkflow(negativePrompt, placeholders) {
     return workflow;
 }
 
-async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath, placeholders, url) {
-    const workflow = (await prepareComfyWorkflow(negativePrompt, placeholders)).replaceAll('"%prompt%"', JSON.stringify(prompt));
+async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath, placeholders, url, imageContinuity) {
+    const workflow = (await prepareComfyWorkflow(negativePrompt, placeholders, imageContinuity, signal)).replaceAll('"%prompt%"', JSON.stringify(prompt));
     console.log(`{
         "prompt": ${workflow}
     }`);
+    assertImageGenerationOrigin(imageContinuity);
+    signal?.throwIfAborted();
     const promptResult = await fetch(`${basePath}/generate`, {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -4375,7 +4420,7 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
  * @param {AbortSignal} signal - An AbortSignal object that can be used to cancel the request.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function generateComfyImage(prompt, negativePrompt, signal) {
+async function generateComfyImage(prompt, negativePrompt, signal, imageContinuity) {
     const placeholders = [
         'model',
         'vae',
@@ -4386,7 +4431,7 @@ async function generateComfyImage(prompt, negativePrompt, signal) {
         'width',
         'height',
     ];
-    return generateComfyImageCommon(prompt, negativePrompt, signal, '/api/sd/comfy', placeholders, extension_settings.sd.comfy_url);
+    return generateComfyImageCommon(prompt, negativePrompt, signal, '/api/sd/comfy', placeholders, extension_settings.sd.comfy_url, imageContinuity);
 }
 
 /**
@@ -4397,7 +4442,7 @@ async function generateComfyImage(prompt, negativePrompt, signal) {
  * @param {AbortSignal} signal - An AbortSignal object that can be used to cancel the request.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function generateComfyRunPodImage(prompt, negativePrompt, signal) {
+async function generateComfyRunPodImage(prompt, negativePrompt, signal, imageContinuity) {
     const placeholders = [
         'steps',
         'scale',
@@ -4405,7 +4450,7 @@ async function generateComfyRunPodImage(prompt, negativePrompt, signal) {
         'height',
     ];
 
-    return generateComfyImageCommon(prompt, negativePrompt, signal, '/api/sd/comfyrunpod', placeholders, extension_settings.sd.comfy_runpod_url);
+    return generateComfyImageCommon(prompt, negativePrompt, signal, '/api/sd/comfyrunpod', placeholders, extension_settings.sd.comfy_runpod_url, imageContinuity);
 }
 
 /**
@@ -5038,7 +5083,8 @@ async function onComfyRenameWorkflowClick() {
  * @param {string} prefixedPrompt Prompt with an attached specific prefix
  * @param {string} format Format of the image (e.g., 'png', 'jpg')
  */
-async function sendMessage(prompt, image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, format) {
+async function sendMessage(prompt, image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, format, imageContinuity) {
+    assertImageGenerationOrigin(imageContinuity);
     const context = getContext();
     const name = context.groupId ? systemUserName : context.name2;
     const template = extension_settings.sd.prompts[generationMode.MESSAGE] || '{{prompt}}';
@@ -5052,6 +5098,7 @@ async function sendMessage(prompt, image, generationType, additionalNegativePref
         generation_type: generationType,
         negative: additionalNegativePrefix,
         source: MEDIA_SOURCE.GENERATED,
+        ...(imageContinuity?.provenance ? { image_context: structuredClone(imageContinuity.provenance) } : {}),
     };
     /** @type {ChatMessage} */
     const message = {
@@ -5061,6 +5108,7 @@ async function sendMessage(prompt, image, generationType, additionalNegativePref
         send_date: getMessageTimeStamp(),
         mes: messageText,
         extra: {
+            image_generation_prompt: messageText,
             media: [mediaAttachment],
             media_display: MEDIA_DISPLAY.GALLERY,
             media_index: 0,
@@ -5364,7 +5412,10 @@ async function generateMediaSwipe(mediaAttachment, message, onStart, onComplete,
     let loaderHandle = ActionLoaderHandle.EMPTY;
 
     try {
-        const callback = (_a, _b, _c, _d, _e, _f, format) => { result.type = isVideo(format) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE; };
+        const callback = (_a, _b, _c, _d, _e, _f, format, continuity) => {
+            result.type = isVideo(format) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE;
+            if (continuity?.provenance) result.image_context = structuredClone(continuity.provenance);
+        };
         const savedPrompt = mediaAttachment.title ?? message.extra.title ?? '';
         const savedNegative = mediaAttachment.negative ?? message.extra.negative ?? '';
         const refineArgs = {

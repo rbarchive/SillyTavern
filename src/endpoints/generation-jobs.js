@@ -47,8 +47,12 @@ router.post('/', async (req, res) => {
             const file = path.join(folder, `generation-${id}.${output.format}`);
             writeAtomic(file, Buffer.from(output.data, 'base64'));
             const url = clientRelativePath(user.directories.root, file);
-            return { message: { ...message, mes: (image.messageTemplate || '{{prompt}}').replaceAll('{{prompt}}', prompt).replaceAll('{{prefixedPrompt}}', prefixed), extra: {
-                ...message.extra, media: [{ url, type: 'image', title: prompt, generation_type: image.generationType, negative: image.negative, source: 'generated' }],
+            const messageText = (image.messageTemplate || '{{prompt}}').replaceAll('{{prompt}}', prompt).replaceAll('{{prefixedPrompt}}', prefixed);
+            return { message: { ...message, mes: messageText, extra: {
+                ...message.extra, image_generation_prompt: messageText,
+                media: [{ url, type: 'image', title: prompt, generation_type: image.generationType, negative: image.negative, source: 'generated',
+                    ...(image.imageContext ? { image_context: structuredClone(image.imageContext) } : {}),
+                }],
                 media_display: 'gallery', media_index: 0, inline_image: false,
             } }, result: { path: url, prompt } };
         });

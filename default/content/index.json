@@ -684,6 +684,10 @@
         "type": "workflow"
     },
     {
+        "filename": "Local_Reference_Image_Continuity.json",
+        "type": "workflow"
+    },
+    {
         "filename": "Local_ZImage_Base.json",
         "type": "workflow"
     }

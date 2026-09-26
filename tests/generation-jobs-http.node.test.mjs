@@ -35,6 +35,7 @@ test('real HTTP acceptance survives closing its socket through quiet description
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
         const payload = { id: 'http-survival', kind: 'image', origin: { avatar: 'Narrator.png', file: 'origin', integrity: 'http-origin' }, message: { name: 'Narrator', is_user: false, mes: '', extra: {} }, chatRequest: { chat_completion_source: 'custom', custom_url: providerUrl + '/v1', model: 'mock', messages: [{ role: 'user', content: 'Describe visitor' }] }, image: { url: providerUrl, workflow: '{"text":"%prompt%"}', prefix: 'photo of {prompt}', folder: 'Narrator', messageTemplate: '{{prompt}}' } };
+        payload.image.imageContext = { version: 1, sourceKind: 'requested_prompt', scope: { worldId: 'synthetic-world', storyId: 'synthetic-story', branchId: 'main' }, appearanceRevision: 'synthetic-appearance', referenceIds: ['synthetic-image-A', 'synthetic-image-B'], sceneLocation: 'synthetic-cafe', contextCharacterIds: ['keeper'] };
         await new Promise((resolve, reject) => {
             const req = http.request(base + '/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json', Connection: 'close' } }, res => { assert.equal(res.statusCode, 202); res.resume(); res.on('end', () => { req.destroy(); resolve(); }); });
             req.on('error', reject); req.end(JSON.stringify(payload));
@@ -47,6 +48,8 @@ test('real HTTP acceptance survives closing its socket through quiet description
         const rows = fs.readFileSync(file, 'utf8').split('\n').map(JSON.parse);
         assert.equal(rows.filter(row => row.extra?.generation_job === payload.id).length, 1);
         assert.match(rows.at(-1).mes, /gray coat/); assert.ok(rows.at(-1).extra.media[0].url);
+        assert.deepEqual(rows.at(-1).extra.media[0].image_context, payload.image.imageContext);
+        assert.equal(rows.at(-1).extra.image_generation_prompt, rows.at(-1).mes);
         assert.equal((await fetch(base + '/jobs/a.b')).status, 400);
         assert.equal((await fetch(base + '/jobs/a.b/cancel', { method: 'POST' })).status, 400);
         const { protectJobResults } = await import('../src/generation-jobs.js');
