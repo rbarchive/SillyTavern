@@ -87,3 +87,42 @@
     top: 0;
     transform: translateX(-50%);
 }
+
+/* Keep image suggestions above the composer without filling a phone screen. */
+@media (max-width: 600px) {
+    .autoComplete-wrap.image-command .autoComplete,
+    .autoComplete-detailsWrap.image-command .autoComplete-details {
+        max-height: min(160px, 30dvh);
+        overscroll-behavior: contain;
+    }
+    .autoComplete-wrap.image-command .specs > .body,
+    .autoComplete-detailsWrap.image-command .specs > .body,
+    .autoComplete-detailsWrap.image-command .aliases {
+        display: none;
+    }
+    #sd_dropdown {
+        max-width: calc(100vw - 16px);
+        max-height: min(240px, 40dvh);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+    #sd_dropdown .list-group-item {
+        padding: 8px 12px;
+        font-size: 14px;
+        line-height: 1.4;
+    }
+}
+
+#sd_generation_status {
+    order: 24;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+    line-height: 1.4;
+    white-space: normal;
+    color: var(--SmartThemeBodyColor);
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}

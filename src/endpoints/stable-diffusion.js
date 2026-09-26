@@ -559,6 +559,71 @@ comfy.post('/rename-workflow', getFileNameValidationFunction('old_name'), getFil
     }
 });
 
+/** Execute a Comfy job independently of a browser connection. */
+export async function runComfyGeneration(body, signal, onSubmitted = () => {}) {
+        let item;
+        const url = new URL(urlJoin(body.url, '/prompt'));
+        const promptResult = await fetch(url, {
+            signal,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: body.prompt,
+        });
+        if (!promptResult.ok) {
+            const text = await promptResult.text();
+            throw new Error('ComfyUI returned an error.', { cause: tryParse(text) });
+        }
+
+        /** @type {any} */
+        const data = await promptResult.json();
+        const id = data.prompt_id;
+        onSubmitted(id);
+        signal?.addEventListener('abort', () => {
+            // Remove only this queued job. Never interrupt another running user's image.
+            fetch(new URL(urlJoin(body.url, '/queue')), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ delete: [id] }) }).catch(() => {});
+        }, { once: true });
+        const historyUrl = new URL(urlJoin(body.url, `/history/${id}`));
+        while (true) {
+            const result = await fetch(historyUrl, { signal });
+            if (!result.ok) {
+                throw new Error('ComfyUI returned an error.');
+            }
+            /** @type {any} */
+            const history = await result.json();
+            item = history[id];
+            if (item) {
+                break;
+            }
+            await delay(100);
+        }
+        if (item.status.status_str === 'error') {
+            // Report node tracebacks if available
+            const errorMessages = item.status?.messages
+                ?.filter(it => it[0] === 'execution_error')
+                .map(it => it[1])
+                .map(it => `${it.node_type} [${it.node_id}] ${it.exception_type}: ${it.exception_message}`)
+                .join('\n') || '';
+            throw new Error(`ComfyUI generation did not succeed.\n\n${errorMessages}`.trim());
+        }
+        const outputs = Object.keys(item.outputs).map(it => item.outputs[it]);
+        console.debug('ComfyUI outputs:', outputs);
+        const imgInfo = outputs.map(it => it.images).filter(Array.isArray).flat()[0]
+            ?? outputs.map(it => it.gifs).filter(Array.isArray).flat()[0];
+        if (!imgInfo) {
+            throw new Error('ComfyUI did not return any recognizable outputs.');
+        }
+        const imgUrl = new URL(urlJoin(body.url, '/view'));
+        imgUrl.search = `?filename=${imgInfo.filename}&subfolder=${imgInfo.subfolder}&type=${imgInfo.type}`;
+        const imgResponse = await fetch(imgUrl, { signal });
+        if (!imgResponse.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        const format = path.extname(imgInfo.filename).slice(1).toLowerCase() || 'png';
+        const imgBuffer = await imgResponse.arrayBuffer();
+        return { format: format, data: Buffer.from(imgBuffer).toString('base64') };
+
+}
+
 comfy.post('/generate', async (request, response) => {
     try {
         let item;

@@ -1,3 +1,4 @@
+import { router as generationJobsRouter } from './endpoints/generation-jobs.js';
 import https from 'node:https';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -159,6 +160,7 @@ export function setupPrivateEndpoints(app) {
     app.use('/api/files', filesRouter);
     app.use('/api/characters', charactersRouter);
     app.use('/api/chats', chatsRouter);
+    app.use('/api/generation-jobs', generationJobsRouter);
     app.use('/api/groups', groupsRouter);
     app.use('/api/worldinfo', worldInfoRouter);
     app.use('/api/stats', statsRouter);

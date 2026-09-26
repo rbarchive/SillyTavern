@@ -402,6 +402,7 @@ export let converter;
 
 // array for prompt token calculations
 
+import { runGenerationJob, generationOrigin, initializeGenerationJobs } from './scripts/generation-jobs.js';
 export const systemUserName = 'SillyTavern System';
 export const neutralCharacterName = 'Assistant';
 let default_user_name = 'User';
@@ -3081,7 +3082,7 @@ export function getStoppingStrings(isImpersonate, isContinue, api = main_api) {
  * @param {GenerateQuietPromptParams} params Parameters for the quiet prompt generation
  * @returns {Promise<string>} Generated text. If using structured output, will contain a serialized JSON object.
  */
-export async function generateQuietPrompt({ quietPrompt = '', quietToLoud = false, skipWIAN = false, quietImage = null, quietName = null, responseLength = null, forceChId = null, jsonSchema = null, removeReasoning = true, trimToSentence = false } = {}) {
+export async function generateQuietPrompt({ quietPrompt = '', quietToLoud = false, skipWIAN = false, quietImage = null, quietName = null, responseLength = null, forceChId = null, jsonSchema = null, removeReasoning = true, trimToSentence = false, prepareRequest = false } = {}) {
     if (arguments.length > 0 && typeof arguments[0] !== 'object') {
         console.trace('generateQuietPrompt called with positional arguments. Please use an object instead.');
         [quietPrompt, quietToLoud, skipWIAN, quietImage, quietName, responseLength, forceChId, jsonSchema] = arguments;
@@ -3100,12 +3101,14 @@ export async function generateQuietPrompt({ quietPrompt = '', quietToLoud = fals
             quietName: quietName ?? null,
             force_chid: forceChId ?? null,
             jsonSchema: jsonSchema ?? null,
+            prepareRequest,
         };
         if (responseLengthCustomized) {
             TempResponseLength.save(main_api, responseLength);
             eventHook = TempResponseLength.setupEventHook(main_api);
         }
         let result = await Generate('quiet', generateOptions);
+        if (prepareRequest) return result;
         result = trimToSentence ? trimToEndSentence(result) : result;
         result = removeReasoning ? removeReasoningFromString(result) : result;
         return result;
@@ -4287,7 +4290,7 @@ function removeLastMessage() {
  * @param {boolean} dryRun Whether to actually generate a message or just assemble the prompt
  * @returns {Promise<any>} Returns a promise that resolves when the text is done generating.
  */
-export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0 } = {}, dryRun = false) {
+export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, prepareRequest = false } = {}, dryRun = false) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -5382,6 +5385,23 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         console.debug(`pushed prompt bits to itemizedPrompts array. Length is now: ${itemizedPrompts.length}`);
 
+        // Background jobs persist their own result; never append it again in this browser.
+        if (!dryRun && !selected_group && main_api === 'openai' && oai_settings.chat_completion_source === 'custom'
+            && ['normal', 'regenerate', 'swipe', 'continue', undefined].includes(type)
+            && !jsonSchema && (oai_settings.n ?? 1) <= 1) {
+            await saveChatConditional();
+            const request = await sendOpenAIRequest(type, generate_data.prompt, null, { prepareRequest: true });
+            if (!request.request.tools?.length) {
+                const origin = generationOrigin();
+                const durableJob = await runGenerationJob({ kind: 'chat', origin,
+                    operation: type === 'continue' ? 'continue' : type === 'swipe' ? 'swipe' : 'append',
+                    chatRequest: request.request,
+                    message: { ...(type === 'continue' || type === 'swipe' ? chat.at(-1) : {}), name: name2, is_user: false, is_system: false, send_date: getMessageTimeStamp(), mes: type === 'continue' ? chat.at(-1)?.mes || '' : '', extra: { ...(type === 'continue' || type === 'swipe' ? chat.at(-1)?.extra : {}) } },
+                }, abortController.signal);
+                return { durableJob };
+            }
+        }
+
         if (isStreamingEnabled() && type !== 'quiet') {
             continue_mag = promptReasoning.removePrefix(continue_mag);
             streamingProcessor = new StreamingProcessor(type, force_name2, generation_started, continue_mag, promptReasoning);
@@ -5446,7 +5466,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 });
             }
         } else {
-            return await sendGenerationRequest(type, generate_data, { jsonSchema });
+            return await sendGenerationRequest(type, generate_data, { jsonSchema, prepareRequest });
         }
     }
 
@@ -5460,6 +5480,14 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
      */
     async function onSuccess(data) {
         if (!data) return;
+        if (prepareRequest) { unblockGeneration(type); return data; }
+        if (data.durableJob) {
+            await applyGenerationJobResult(data.durableJob, type);
+            unblockGeneration(type);
+            streamingProcessor = null;
+            playMessageSound();
+            return data.durableJob.result.text;
+        }
 
         if (data?.fromStream) {
             return data;
@@ -12597,3 +12625,18 @@ jQuery(async function () {
         }
     });
 });
+
+initializeGenerationJobs();
+
+/** Apply browser extension processing once when a server completion is observed. */
+export async function applyGenerationJobResult(job, type = 'normal') {
+    const messageId = chat.findIndex(message => message.extra?.generation_job === job.id);
+    if (messageId < 0 || chat[messageId].extra.generation_job_processed) return;
+    const image = !!job.result?.path;
+    if (!image) chat[messageId].mes = cleanUpMessage({ getMessage: chat[messageId].mes, isImpersonate: false, isContinue: type === 'continue', displayIncompleteSentences: false });
+    chat[messageId].extra.generation_job_processed = true;
+    await redisplayChat({ startIndex: messageId, fade: false });
+    await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, image ? 'extension' : type);
+    await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, image ? 'extension' : type);
+    await saveChatConditional();
+}

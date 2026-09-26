@@ -1,4 +1,7 @@
+import { runGenerationJob, generationOrigin } from '../../generation-jobs.js';
 import { applyLocalImagePreset } from './local-image-preset.js';
+import { applyLocalImageModel } from './local-image-models.js';
+import { beginImageGenerationStatus } from './image-generation-status.js';
 import { Popper } from '../../../lib.js';
 import {
     animation_duration,
@@ -9,6 +12,7 @@ import {
     generateQuietPrompt,
     getCharacterAvatar,
     getCurrentChatId,
+    main_api,
     getRequestHeaders,
     getUserAvatar,
     saveSettingsDebounced,
@@ -47,6 +51,7 @@ import { SECRET_KEYS, secret_state } from '../../secrets.js';
 import { getNovelAnlas, getNovelUnlimitedImageGeneration, loadNovelSubscriptionData } from '../../nai-settings.js';
 import { getMultimodalCaption } from '../shared.js';
 import { SlashCommandParser } from '../../slash-commands/SlashCommandParser.js';
+import { executeSlashCommandsWithOptions } from '../../slash-commands.js';
 import { SlashCommand } from '../../slash-commands/SlashCommand.js';
 import {
     ARGUMENT_TYPE,
@@ -1492,6 +1497,13 @@ async function validateComfyRunPodUrl() {
 async function onModelChange() {
     const selectedModel = $('#sd_model').find(':selected');
     extension_settings.sd.model = selectedModel.val();
+    if (applyLocalImageModel(extension_settings.sd)) {
+        $('#sd_comfy_workflow').val(extension_settings.sd.comfy_workflow);
+        $('#sd_steps').val(extension_settings.sd.steps).trigger('input');
+        $('#sd_scale').val(extension_settings.sd.scale).trigger('input');
+        $('#sd_sampler').val(extension_settings.sd.sampler);
+        $('#sd_scheduler').val(extension_settings.sd.scheduler);
+    }
     saveSettingsDebounced();
 
     if (extension_settings.sd.model && extension_settings.sd.source === sources.electronhub) {
@@ -2890,7 +2902,11 @@ function getQuietPrompt(mode, trigger) {
         return trigger;
     }
 
-    return stringFormat(extension_settings.sd.prompts[mode], trigger);
+    const template = extension_settings.sd.prompts[mode];
+    if (mode === generationMode.FREE_EXTENDED && template === promptTemplates[mode]) {
+        return `Create concise English visual tags for this image request: "${trigger}". Use the people, appearance, clothing, world facts and current scene already established in the conversation. Describe visible details only. Return a concise comma-separated image prompt.`;
+    }
+    return stringFormat(template, trigger);
 }
 
 /**
@@ -3048,8 +3064,18 @@ async function generatePicture(initiator, args, trigger, message, callback) {
     const stopListener = () => abortController.abort('Aborted by user');
 
     let loaderHandle = ActionLoaderHandle.EMPTY;
+    const generationStatus = beginImageGenerationStatus();
 
     try {
+        if (!selected_group && extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type === comfyTypes.standard && main_api === 'openai' && oai_settings.chat_completion_source === 'custom'
+            && !callback && !extension_settings.sd.refine_mode && generationType !== generationMode.BACKGROUND
+            && ![generationMode.FACE_MULTIMODAL, generationMode.CHARACTER_MULTIMODAL, generationMode.USER_MULTIMODAL].includes(generationType)) {
+            args?._abortController?.addEventListener('abort', stopListener, { once: true });
+            loaderHandle = loader.show({ blocking: false, slug: `${MODULE_NAME}-image-generation`, title: t`Image Generation`,
+                message: '서버에서 이미지 생성 중 · 화면을 바꿔도 계속 처리됩니다', onStop: stopListener });
+            return await generateBackgroundImage(generationType, trigger, message, quietPrompt, negativePromptPrefix, characterName, initiator, abortController.signal, generationStatus);
+        }
+
         const combineNegatives = (prefix) => { negativePromptPrefix = combinePrefixes(negativePromptPrefix, prefix); };
 
         // generate the text prompt for the image
@@ -3074,6 +3100,8 @@ async function generatePicture(initiator, args, trigger, message, callback) {
             onStop: stopListener,
         });
 
+        generationStatus.update(t`Image generation: drawing image…`);
+
         // generate the image
         imagePath = await sendGenerationRequest(generationType, prompt, negativePromptPrefix, characterName, callback, initiator, abortController.signal);
     } catch (err) {
@@ -3088,10 +3116,13 @@ async function generatePicture(initiator, args, trigger, message, callback) {
         // errors here are most likely due to text generation failure
         // sendGenerationRequest mostly deals with its own errors
         const reason = err.error?.message || err.message || 'Unknown error';
-        const errorText = 'SD prompt text generation failed. ' + reason;
+        const errorText = /failed to fetch|networkerror|load failed/i.test(reason)
+            ? t`Connection lost while preparing the image description. Check the ST server and chat model connection, then try again.`
+            : t`Image description preparation failed: ${reason}`;
         toastr.error(errorText, 'Image Generation');
         throw new Error(errorText);
     } finally {
+        generationStatus.hide();
         restoreOriginalDimensions(dimensions);
         await loaderHandle.hide();
     }
@@ -3294,18 +3325,52 @@ function getUserAvatarUrl() {
  * @param {string} quietPrompt - The prompt to use for the image generation.
  * @returns {Promise<string>} - A promise that resolves when the prompt generation completes.
  */
-async function generatePrompt(quietPrompt) {
-    const toast = toastr.info('Generating image prompt with an LLM...', 'Image Generation');
-    const reply = await generateQuietPrompt({ quietPrompt });
-    const processedReply = processReply(reply);
-    toastr.clear(toast);
+function imageDescriptionInstruction(quietPrompt) {
+    return `${quietPrompt}\n\nReturn only a compact English image prompt with visual tags. Use the described subject and established scene facts. Do not discuss these instructions, prefixes, or who the user/assistant is. Omit any empty character prefix. No explanation, dialogue, or story continuation. /no_think`;
+}
 
-    if (!processedReply) {
-        toastr.error('Prompt generation produced no text. Make sure you\'re using a valid instruct template and try again', 'Image Generation');
-        throw new Error('Prompt generation failed.');
+async function generateBackgroundImage(generationType, trigger, message, quietPrompt, negative, folder, initiator, signal, status) {
+    const context = getContext();
+    const origin = generationOrigin();
+    let prompt;
+    let chatRequest;
+    if (generationType === generationMode.FREE) prompt = generateFreeModePrompt(trigger, prefix => { negative = combinePrefixes(negative, prefix); });
+    else if (generationType === generationMode.RAW_LAST) prompt = message || getRawLastMessage();
+    else {
+        const prepared = await generateQuietPrompt({ quietPrompt: imageDescriptionInstruction(quietPrompt), responseLength: 4096, prepareRequest: true });
+        if (!prepared?.request) throw new Error('이미지 묘사 요청을 준비하지 못했습니다.');
+        chatRequest = prepared.request;
     }
+    const skip = [generationMode.FREE, generationMode.BACKGROUND, generationMode.USER, generationMode.FREE_EXTENDED].includes(generationType);
+    const prefix = substituteParams(skip ? extension_settings.sd.prompt_prefix : combinePrefixes(extension_settings.sd.prompt_prefix, getCharacterPrefix()));
+    const negativePrompt = substituteParams(combinePrefixes(negative, skip ? extension_settings.sd.negative_prompt : combinePrefixes(extension_settings.sd.negative_prompt, getCharacterNegativePrefix())));
+    const workflow = await prepareComfyWorkflow(negativePrompt, ['model', 'vae', 'sampler', 'scheduler', 'steps', 'scale', 'width', 'height']);
+    // Save the origin before acceptance; every later stage runs on the server.
+    if (JSON.stringify(origin) !== JSON.stringify(generationOrigin())) throw new Error('요청 준비 중 이야기가 변경되었습니다. 다시 실행해 주세요.');
+    await context.saveChat();
+    const name = context.groupId ? systemUserName : context.name2;
+    const messageTemplate = substituteParamsExtended(extension_settings.sd.prompts[generationMode.MESSAGE] || '{{prompt}}', { char: name, prompt: '{{prompt}}', prefixedPrompt: '{{prefixedPrompt}}' });
+    const job = await runGenerationJob({ kind: 'image', origin, operation: 'append', chatRequest,
+        image: { workflow, url: extension_settings.sd.comfy_url, prefix, negative: negativePrompt, prompt, folder,
+            minimal: extension_settings.sd.minimal_prompt_processing, generationType, messageTemplate },
+        message: { name, is_user: false, is_system: !getVisibilityByInitiator(initiator), send_date: getMessageTimeStamp(), mes: '', extra: {} },
+    }, signal, job => status.update(job.progress?.phase === 'drawing' ? t`Image generation: drawing image…` : t`Preparing image description with the chat model…`));
+    return job.result.path;
+}
 
-    return processedReply;
+async function generatePrompt(quietPrompt) {
+    const toast = toastr.info(t`Preparing image description with the chat model…`, t`Image Generation`);
+    try {
+        const concisePrompt = imageDescriptionInstruction(quietPrompt);
+        const reply = await generateQuietPrompt({ quietPrompt: concisePrompt, responseLength: 4096 });
+        const processedReply = processReply(reply);
+        if (!processedReply) {
+            throw new Error(t`The chat model returned no image description. Check the model connection and try again.`);
+        }
+        return processedReply;
+    } finally {
+        toastr.clear(toast);
+    }
 }
 
 /**
@@ -4223,7 +4288,7 @@ async function generateAimlapiImage(prompt, signal) {
  * @param {string} url - The url of the service to call. Passed to ST server.
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
-async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath, placeholders, url) {
+async function prepareComfyWorkflow(negativePrompt, placeholders) {
     const workflowResponse = await fetch('/api/sd/comfy/workflow', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -4235,7 +4300,7 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
         const text = await workflowResponse.text();
         toastr.error(`Failed to load workflow.\n\n${text}`);
     }
-    let workflow = (await workflowResponse.json()).replaceAll('"%prompt%"', JSON.stringify(prompt));
+    let workflow = (await workflowResponse.json());
     workflow = workflow.replaceAll('"%negative_prompt%"', JSON.stringify(negativePrompt));
 
     const seed = extension_settings.sd.seed >= 0 ? extension_settings.sd.seed : Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
@@ -4275,6 +4340,11 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
             workflow = workflow.replaceAll('"%char_avatar%"', JSON.stringify(PNG_PIXEL));
         }
     }
+    return workflow;
+}
+
+async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath, placeholders, url) {
+    const workflow = (await prepareComfyWorkflow(negativePrompt, placeholders)).replaceAll('"%prompt%"', JSON.stringify(prompt));
     console.log(`{
         "prompt": ${workflow}
     }`);
@@ -5059,6 +5129,10 @@ async function addSDGenButtons() {
     $('#sd_dropdown [id]').on('click', function () {
         dropdown.fadeOut(animation_duration);
         const id = $(this).attr('id');
+        if (id === 'sd_counterpart') {
+            executeSlashCommandsWithOptions('/imagine extend=true 현재 대화 상대의 외모와 복장. 대화와 세계관에서 나온 정보 및 현재 상황을 반영한 인물 그림');
+            return;
+        }
         const idParamMap = {
             'sd_you': 'you',
             'sd_face': 'face',
@@ -5496,7 +5570,7 @@ export async function init() {
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'imagine',
-        returns: 'URL of the generated image, or an empty string if the generation failed',
+        returns: translate('URL of the generated image, or an empty string if the generation failed'),
         callback: async (args, trigger) => {
             const currentSettings = applyCommandArguments(args);
 
@@ -5531,21 +5605,21 @@ export async function init() {
         aliases: ['sd', 'img', 'image'],
         namedArgumentList: [
             new SlashCommandNamedArgument(
-                'quiet', 'whether to post the generated image to chat', [ARGUMENT_TYPE.BOOLEAN], false, false, 'false',
+                'quiet', translate('whether to post the generated image to chat'), [ARGUMENT_TYPE.BOOLEAN], false, false, 'false',
             ),
             new SlashCommandNamedArgument(
-                'gallery', 'whether to save the generated image to the character gallery', [ARGUMENT_TYPE.BOOLEAN], false, false, 'true',
+                'gallery', translate('whether to save the generated image to the character gallery'), [ARGUMENT_TYPE.BOOLEAN], false, false, 'true',
             ),
             SlashCommandNamedArgument.fromProps({
                 name: 'negative',
-                description: 'negative prompt prefix',
+                description: translate('negative prompt prefix'),
                 typeList: [ARGUMENT_TYPE.STRING],
                 isRequired: false,
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'extend',
-                description: 'auto-extend free mode prompts with the LLM',
+                description: translate('auto-extend free mode prompts with the LLM'),
                 typeList: [ARGUMENT_TYPE.BOOLEAN],
                 enumProvider: commonEnumProviders.boolean('trueFalse'),
                 isRequired: false,
@@ -5553,7 +5627,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'edit',
-                description: 'edit the prompt before generation',
+                description: translate('edit the prompt before generation'),
                 typeList: [ARGUMENT_TYPE.BOOLEAN],
                 enumProvider: commonEnumProviders.boolean('trueFalse'),
                 isRequired: false,
@@ -5561,7 +5635,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'multimodal',
-                description: 'use multimodal captioning (for portraits only)',
+                description: translate('use multimodal captioning (for portraits only)'),
                 typeList: [ARGUMENT_TYPE.BOOLEAN],
                 enumProvider: commonEnumProviders.boolean('trueFalse'),
                 isRequired: false,
@@ -5569,7 +5643,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'snap',
-                description: 'snap auto-adjusted dimensions to the nearest known resolution (portraits and backgrounds only)',
+                description: translate('snap auto-adjusted dimensions to the nearest known resolution (portraits and backgrounds only)'),
                 typeList: [ARGUMENT_TYPE.BOOLEAN],
                 enumProvider: commonEnumProviders.boolean('trueFalse'),
                 isRequired: false,
@@ -5577,60 +5651,60 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'processing',
-                description: 'level of response prompt processing returned by the LLM',
+                description: translate('level of response prompt processing returned by the LLM'),
                 typeList: [ARGUMENT_TYPE.STRING],
                 enumList: [
-                    new SlashCommandEnumValue('standard', 'Standard prompt processing'),
-                    new SlashCommandEnumValue('minimal', 'Minimal prompt processing'),
+                    new SlashCommandEnumValue('standard', translate('Standard prompt processing')),
+                    new SlashCommandEnumValue('minimal', translate('Minimal prompt processing')),
                 ],
                 isRequired: false,
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'seed',
-                description: 'random seed',
+                description: translate('random seed'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'width',
-                description: 'image width',
+                description: translate('image width'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'height',
-                description: 'image height',
+                description: translate('image height'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'steps',
-                description: 'number of steps',
+                description: translate('number of steps'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'cfg',
-                description: 'CFG scale',
+                description: translate('CFG scale'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'skip',
-                description: 'CLIP skip layers',
+                description: translate('CLIP skip layers'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'model',
-                description: 'model override',
+                description: translate('model override'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.STRING],
                 acceptsMultiple: false,
@@ -5639,7 +5713,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'sampler',
-                description: 'sampler override',
+                description: translate('sampler override'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.STRING],
                 acceptsMultiple: false,
@@ -5648,7 +5722,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'scheduler',
-                description: 'scheduler override',
+                description: translate('scheduler override'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.STRING],
                 acceptsMultiple: false,
@@ -5657,7 +5731,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'vae',
-                description: 'VAE name override',
+                description: translate('VAE name override'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.STRING],
                 acceptsMultiple: false,
@@ -5666,7 +5740,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'upscaler',
-                description: 'upscaler override',
+                description: translate('upscaler override'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.STRING],
                 acceptsMultiple: false,
@@ -5675,7 +5749,7 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'hires',
-                description: 'enable high-res fix',
+                description: translate('enable high-res fix'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.BOOLEAN],
                 acceptsMultiple: false,
@@ -5683,28 +5757,28 @@ export async function init() {
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'scale',
-                description: 'upscale amount',
+                description: translate('upscale amount'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'denoise',
-                description: 'denoising strength',
+                description: translate('denoising strength'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: '2ndpass',
-                description: 'second pass steps',
+                description: translate('second pass steps'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 acceptsMultiple: false,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'faces',
-                description: 'restore faces',
+                description: translate('restore faces'),
                 isRequired: false,
                 typeList: [ARGUMENT_TYPE.BOOLEAN],
                 acceptsMultiple: false,
@@ -5713,20 +5787,18 @@ export async function init() {
         ],
         unnamedArgumentList: [
             new SlashCommandArgument(
-                'argument', [ARGUMENT_TYPE.STRING], false, false, null, Object.values(triggerWords).flat(),
+                translate('Image subject or your own description'), [ARGUMENT_TYPE.STRING], false, false, null, [
+                    new SlashCommandEnumValue('you', translate('Chat character appearance')),
+                    new SlashCommandEnumValue('face', translate('Chat character face')),
+                    new SlashCommandEnumValue('me', translate('My persona appearance')),
+                    new SlashCommandEnumValue('scene', translate('Current story scene')),
+                    new SlashCommandEnumValue('last', translate('Scene from the last message')),
+                    new SlashCommandEnumValue('raw_last', translate('Use the last message directly')),
+                    new SlashCommandEnumValue('background', translate('Current scene background')),
+                ],
             ),
         ],
-        helpString: `
-            <div>
-                Requests to generate an image and posts it to chat (unless <code>quiet=true</code> argument is specified). The image is saved to the character gallery by default; use <code>gallery=false</code> to save to the root of the user images directory.
-            </div>
-            <div>
-                Supported arguments: <code>${Object.values(triggerWords).flat().join(', ')}</code>.
-            </div>
-            <div>
-                Anything else would trigger a "free mode" to make generate whatever you prompted. Example: <code>/imagine apple tree</code> would generate a picture of an apple tree. Returns a link to the generated image.
-            </div>
-        `,
+        helpString: translate('Write a description after /image, for example /image a traveler at the harbor. Or choose: you = chat character, face = character face, me = my persona, scene = story scene, last = last conversation, raw_last = last message directly, background = background.'),
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
@@ -5742,7 +5814,7 @@ export async function init() {
                 enumProvider: getSelectEnumProvider('sd_source', true),
             }),
         ],
-        helpString: 'If an argument is provided, change the source of the image generation, e.g. <code>/imagine-source comfy</code>. Returns the current source.',
+        helpString: translate('If an argument is provided, change the source of the image generation, e.g. <code>/imagine-source comfy</code>. Returns the current source.'),
         callback: async (_args, name) => {
             if (!name) {
                 return extension_settings.sd.source;
@@ -5774,7 +5846,7 @@ export async function init() {
                 enumProvider: getSelectEnumProvider('sd_style', false),
             }),
         ],
-        helpString: 'If an argument is provided, change the style of the image generation, e.g. <code>/imagine-style MyStyle</code>. Returns the current style.',
+        helpString: translate('If an argument is provided, change the style of the image generation, e.g. <code>/imagine-style MyStyle</code>. Returns the current style.'),
         callback: async (_args, name) => {
             if (!name) {
                 return extension_settings.sd.style;
@@ -5801,7 +5873,7 @@ export async function init() {
                 enumProvider: getSelectEnumProvider('sd_comfy_workflow', false),
             }),
         ],
-        helpString: '(workflowName) - change the workflow to be used for image generation with ComfyUI, e.g. <pre><code>/imagine-comfy-workflow MyWorkflow</code></pre>',
+        helpString: translate('(workflowName) - change the workflow to be used for image generation with ComfyUI, e.g. <pre><code>/imagine-comfy-workflow MyWorkflow</code></pre>'),
     }));
 
 

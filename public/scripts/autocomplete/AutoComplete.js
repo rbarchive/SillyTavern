@@ -475,6 +475,10 @@ export class AutoComplete {
      */
     render() {
         if (!this.isActive) return this.domWrap.remove();
+        const isImageCommand = this.textarea.id === 'send_textarea'
+            && /^\/(?:image|imagine|img|sd)(?:\s|$)/i.test(this.textarea.value);
+        this.domWrap.classList.toggle('image-command', isImageCommand);
+        this.detailsWrap.classList.toggle('image-command', isImageCommand);
         if (this.isReplaceable) {
             this.dom.innerHTML = '';
             const frag = document.createDocumentFragment();

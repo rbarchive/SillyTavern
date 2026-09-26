@@ -678,5 +678,13 @@
     {
         "filename": "Local_SDXL_Turbo_Selectable.json",
         "type": "workflow"
+    },
+    {
+        "filename": "Local_Juggernaut_XL_Quality.json",
+        "type": "workflow"
+    },
+    {
+        "filename": "Local_ZImage_Base.json",
+        "type": "workflow"
     }
 ]

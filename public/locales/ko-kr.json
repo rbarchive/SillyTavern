@@ -1282,13 +1282,13 @@
     "ext_regex_export_script": "스크립트 내보내기",
     "ext_regex_delete_script": "스크립트 삭제",
     "Trigger Stable Diffusion": "트리거 안정 확산",
-    "sd_Yourself": "당신 자신",
-    "sd_Your_Face": "너의 얼굴",
-    "sd_Me": "나",
-    "sd_The_Whole_Story": "전체 스토리",
-    "sd_The_Last_Message": "마지막 메시지",
-    "sd_Raw_Last_Message": "원시 마지막 메시지",
-    "sd_Background": "배경",
+    "sd_Yourself": "대화 캐릭터의 외모",
+    "sd_Your_Face": "대화 캐릭터의 얼굴",
+    "sd_Me": "내 페르소나의 외모",
+    "sd_The_Whole_Story": "현재 이야기 장면",
+    "sd_The_Last_Message": "마지막 대화의 장면",
+    "sd_Raw_Last_Message": "마지막 문장 그대로",
+    "sd_Background": "현재 장면의 배경",
     "Image Generation": "이미지 생성",
     "sd_refine_mode": "프롬프트를 생성 API로 보내기 전에 수동으로 편집할 수 있도록 허용",
     "sd_refine_mode_txt": "생성 전에 프롬프트 편집",
@@ -1635,5 +1635,52 @@
     "Deleting chat…": "채팅 삭제 중…",
     "Loading chat…": "채팅 불러오는 중…",
     "Bulk Delete": "대량 삭제",
-    "Deleting ${0} character(s)…": "${0}개 캐릭터 삭제 중…"
+    "Deleting ${0} character(s)…": "${0}개 캐릭터 삭제 중…",
+    "URL of the generated image, or an empty string if the generation failed": "생성된 이미지 주소 (실패하면 빈 값)"
+,    "whether to post the generated image to chat": "채팅에 표시하지 않으려면 quiet=true"
+,    "whether to save the generated image to the character gallery": "캐릭터 갤러리에 저장"
+,    "negative prompt prefix": "이미지에서 제외할 요소"
+,    "auto-extend free mode prompts with the LLM": "대화 모델이 이미지 묘사를 보완"
+,    "edit the prompt before generation": "생성 전에 묘사 편집"
+,    "use multimodal captioning (for portraits only)": "참고 이미지로 외모 묘사 (인물용)"
+,    "snap auto-adjusted dimensions to the nearest known resolution (portraits and backgrounds only)": "인물·배경의 해상도를 권장 크기로 맞춤"
+,    "level of response prompt processing returned by the LLM": "대화 모델의 묘사를 정리하는 정도"
+,    "Standard prompt processing": "일반적인 묘사 정리"
+,    "Minimal prompt processing": "묘사를 최소한으로 정리"
+,    "random seed": "같은 결과를 재현하는 시드 값"
+,    "image width": "이미지 너비"
+,    "image height": "이미지 높이"
+,    "number of steps": "생성 단계 수"
+,    "CFG scale": "묘사를 따르는 강도"
+,    "CLIP skip layers": "텍스트 인코더의 건너뛸 층 수"
+,    "model override": "이번 생성에 사용할 모델"
+,    "sampler override": "이번 생성에 사용할 샘플러"
+,    "scheduler override": "이번 생성에 사용할 스케줄러"
+,    "VAE name override": "이번 생성에 사용할 VAE"
+,    "upscaler override": "확대 모델"
+,    "enable high-res fix": "고해상도 보정 사용"
+,    "upscale amount": "확대 배율"
+,    "denoising strength": "확대할 때 이미지를 바꾸는 정도"
+,    "second pass steps": "확대 후 추가 생성 단계 수"
+,    "restore faces": "얼굴 복원 사용"
+,    "Image subject or your own description": "이미지 대상 또는 직접 작성한 묘사"
+,    "Chat character appearance": "대화 캐릭터의 외모"
+,    "Chat character face": "대화 캐릭터의 얼굴"
+,    "My persona appearance": "내 페르소나의 외모"
+,    "Current story scene": "현재 이야기의 장면"
+,    "Scene from the last message": "마지막 대화를 바탕으로 장면 생성"
+,    "Use the last message directly": "마지막 대화 문장을 그대로 사용"
+,    "Current scene background": "현재 장면의 배경"
+,    "Write a description after /image, for example /image a traveler at the harbor. Or choose: you = chat character, face = character face, me = my persona, scene = story scene, last = last conversation, raw_last = last message directly, background = background.": "이미지 묘사를 /image 뒤에 쓰세요. 예: /image 항구에 서 있는 여행자. 대상 선택: you=대화 캐릭터, face=캐릭터 얼굴, me=내 페르소나, scene=이야기 장면, last=마지막 대화, raw_last=마지막 문장 그대로, background=배경."
+,    "Send me a picture of:": "이미지로 만들 대상",
+    "If an argument is provided, change the source of the image generation, e.g. <code>/imagine-source comfy</code>. Returns the current source.": "이미지 생성 방식을 선택합니다. 예: <code>/imagine-source comfy</code>. 값을 생략하면 현재 방식을 확인합니다.",
+    "If an argument is provided, change the style of the image generation, e.g. <code>/imagine-style MyStyle</code>. Returns the current style.": "이미지 스타일을 선택합니다. 예: <code>/imagine-style MyStyle</code>. 값을 생략하면 현재 스타일을 확인합니다.",
+    "(workflowName) - change the workflow to be used for image generation with ComfyUI, e.g. <pre><code>/imagine-comfy-workflow MyWorkflow</code></pre>": "이미지 생성 워크플로를 선택합니다. 예: <code>/imagine-comfy-workflow Local_Juggernaut_XL_Quality.json</code>.",
+    "sd_Counterpart_Description": "상대묘사",
+    "Image generation: preparing description…": "이미지 생성 중 · 상대와 장면 묘사 준비…",
+    "Image generation: drawing image…": "이미지 생성 중 · 그림을 그리고 있습니다…",
+    "Preparing image description with the chat model…": "대화 모델이 이미지 묘사를 준비하고 있습니다…",
+    "The chat model returned no image description. Check the model connection and try again.": "대화 모델이 이미지 묘사를 반환하지 않았습니다. 모델 연결을 확인하고 다시 시도해주세요.",
+    "Connection lost while preparing the image description. Check the ST server and chat model connection, then try again.": "이미지 묘사를 준비하다 연결이 끊겼습니다. ST 서버와 대화 모델 연결을 확인한 뒤 다시 시도해주세요.",
+    "Image description preparation failed: ${0}": "이미지 묘사 준비에 실패했습니다: ${0}"
 }
