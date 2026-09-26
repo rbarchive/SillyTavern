@@ -23,9 +23,25 @@ test('local Qwen defaults skip reasoning without losing any RP source or continu
     const continuation = { ...input, messages: [...input.messages, { role: 'assistant', content: '그녀는' }] };
     assert.equal(prepareLocalDialogueParams(continuation, settings).messages.at(-1).content, '<think>\n\n</think>\n\n그녀는');
     assert.deepEqual(prepareLocalDialogueParams(result, settings), result);
-    for (const excluded of [{ lmstudio_skip_reasoning: false }, { tools: [{}] }, { json_schema: {} }]) {
+    for (const excluded of [{ lmstudio_skip_reasoning: false }, { json_schema: {} }]) {
         assert.equal(prepareLocalDialogueParams(input, { ...settings, ...excluded }), input);
     }
     assert.equal(prepareLocalDialogueParams(input, { custom_url: 'https://example.com/v1' }), input);
     assert.equal(prepareLocalDialogueParams({ ...input, model: 'gemma4' }, settings).model, 'gemma4');
+});
+
+test('tool-enabled Qwen dialogue skips reasoning and preserves tool definitions and call history', () => {
+    const tools = [{ type: 'function', function: { name: 'RpMemoryOpenWorldHub', parameters: { type: 'object', properties: {} } } }];
+    const settings = { custom_url: 'http://127.0.0.1:9998/v1', tools };
+    const call = { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'RpMemoryOpenWorldHub', arguments: '{}' } }] };
+    for (const history of [[], [call], [call, { role: 'tool', tool_call_id: 'call_1', content: 'World Hub opened' }]]) {
+        const input = { model: 'qwen3.8-27b-uncensored-mlx', messages: [{ role: 'user', content: '허브를 열어 주세요' }, ...history], tools, tool_choice: 'auto' };
+        const before = structuredClone(input);
+        const result = prepareLocalDialogueParams(input, settings);
+        assert.deepEqual(result.messages.slice(0, -1), before.messages);
+        assert.deepEqual(result.messages.at(-1), { role: 'assistant', content: '<think>\n\n</think>\n\n' });
+        assert.deepEqual(result.tools, tools);
+        assert.equal(result.tool_choice, 'auto');
+        assert.deepEqual(input, before);
+    }
 });

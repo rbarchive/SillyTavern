@@ -5,6 +5,7 @@
 */
 import { Fuse, DOMPurify } from '../lib.js';
 import { migrateLocalDialogueDefaults } from './local-dialogue-defaults.js';
+import { orderedExtensionPromptKeys } from './rp-extension-order.js';
 
 import {
     abortStatusCheck,
@@ -1452,7 +1453,7 @@ async function preparePromptsForChatCompletion({ scenario, charPersonality, name
     ];
 
     // Anything that is not a known extension prompt
-    for (const key in extensionPrompts) {
+    for (const key of orderedExtensionPromptKeys(extensionPrompts)) {
         if (Object.hasOwn(extensionPrompts, key)) {
             const prompt = extensionPrompts[key];
             if (knownExtensionPrompts.includes(key)) continue;

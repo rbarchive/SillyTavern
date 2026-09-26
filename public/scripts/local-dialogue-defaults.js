@@ -14,12 +14,12 @@ export function prepareLocalDialogueParams(params, settings) {
         local ||= ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
     } catch { /* Invalid URLs are handled by the existing request path. */ }
     if (!local || settings.lmstudio_skip_reasoning === false || !/qwen3/i.test(String(params.model))
-        || !Array.isArray(params.messages) || settings.tools?.length || settings.json_schema) return params;
+        || !Array.isArray(params.messages) || settings.json_schema) return params;
     const result = structuredClone(params);
     const tail = result.messages.at(-1);
     const prefix = '<think>\n\n</think>\n\n';
     // Preserve an existing assistant continuation (including RP continue/swipe prefixes).
-    if (tail?.role === 'assistant') {
+    if (tail?.role === 'assistant' && !tail.tool_calls?.length) {
         if (typeof tail.content !== 'string' || /<think>|<\/think>/.test(tail.content)) return params;
         tail.content = prefix + tail.content;
     } else {
