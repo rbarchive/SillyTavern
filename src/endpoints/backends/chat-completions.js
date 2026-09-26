@@ -70,6 +70,7 @@ import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
 import { getCookieSecret } from '../../users.js';
 import { fetchGoogleModels, GoogleModelsHttpError } from './google-models.js';
 import { ensureLmStudioContext } from './lmstudio-context.js';
+import { ensureQwenUserQuery } from './qwen-user-query.js';
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -2253,20 +2254,6 @@ router.post('/generate', async function (request, response) {
                 getPromptNames(request));
         }
 
-        // LM Studio templates may require a user turn even for assistant-only continuations.
-        // Semi strict deliberately omits placeholders; add one only when no user turn remains.
-        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM
-            && request.body.lmstudio_match_context
-            && [PROMPT_PROCESSING_TYPE.SEMI, PROMPT_PROCESSING_TYPE.SEMI_TOOLS].includes(postProcessingType)
-            && Array.isArray(request.body.messages)
-            && !request.body.messages.some(message => message.role === 'user')) {
-            request.body.messages = postProcessPrompt(
-                request.body.messages,
-                postProcessingType === PROMPT_PROCESSING_TYPE.SEMI_TOOLS
-                    ? PROMPT_PROCESSING_TYPE.STRICT_TOOLS : PROMPT_PROCESSING_TYPE.STRICT,
-                getPromptNames(request));
-        }
-
         if (request.body.json_schema?.value) {
             request.body.json_schema.value = flattenSchema(request.body.json_schema.value, request.body.chat_completion_source);
         }
@@ -2685,6 +2672,11 @@ router.post('/generate', async function (request, response) {
 
         if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM) {
             excludeKeysByYaml(requestBody, request.body.custom_exclude_body);
+        }
+
+        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM
+            && /qwen3/i.test(String(requestBody.model))) {
+            requestBody.messages = ensureQwenUserQuery(requestBody.messages, getConfigValue('promptPlaceholder', "Let's get started."));
         }
 
         /** @type {import('node-fetch').RequestInit} */
