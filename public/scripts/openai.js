@@ -4,6 +4,7 @@
 * https://github.com/CncAnon1/TavernAITurbo
 */
 import { Fuse, DOMPurify } from '../lib.js';
+import { migrateLocalDialogueDefaults } from './local-dialogue-defaults.js';
 
 import {
     abortStatusCheck,
@@ -348,6 +349,7 @@ export const settingsToUpdate = {
     cometapi_model: ['#model_cometapi_select', 'cometapi_model', false, true],
     custom_model: ['#custom_model_id', 'custom_model', false, true],
     custom_url: ['#custom_api_url_text', 'custom_url', false, true],
+    lmstudio_skip_reasoning: ['#lmstudio_skip_reasoning', 'lmstudio_skip_reasoning', true, true],
     lmstudio_match_context: ['#lmstudio_match_context', 'lmstudio_match_context', true, true],
     custom_include_body: ['#custom_include_body', 'custom_include_body', false, true],
     custom_exclude_body: ['#custom_exclude_body', 'custom_exclude_body', false, true],
@@ -374,7 +376,7 @@ export const settingsToUpdate = {
     scenario_format: ['#scenario_format_textarea', 'scenario_format', false, false],
     personality_format: ['#personality_format_textarea', 'personality_format', false, false],
     group_nudge_prompt: ['#group_nudge_prompt_textarea', 'group_nudge_prompt', false, false],
-    stream_openai: ['#stream_toggle', 'stream_openai', true, false],
+    stream_openai: ['#stream_toggle', 'stream_openai', true, true],
     prompts: ['', 'prompts', false, false],
     prompt_order: ['', 'prompt_order', false, false],
     show_external_models: ['#openai_show_external_models', 'show_external_models', true, true],
@@ -419,7 +421,9 @@ const default_settings = {
     min_p_openai: 0,
     top_a_openai: 0,
     repetition_penalty_openai: 1,
-    stream_openai: false,
+    stream_openai: true,
+    lmstudio_skip_reasoning: true,
+    rp_dialogue_defaults_version: 1,
     openai_max_context: max_4k,
     openai_max_tokens: 300,
     ...chatCompletionDefaultPrompts,
@@ -2813,6 +2817,7 @@ export async function createGenerationParameters(settings, model, type, messages
         'max_tokens': settings.openai_max_tokens,
         'lmstudio_match_context': settings.chat_completion_source === chat_completion_sources.CUSTOM && settings.lmstudio_match_context,
         'lmstudio_context_length': settings.openai_max_context,
+        'lmstudio_skip_reasoning': settings.lmstudio_skip_reasoning !== false,
         'stream': stream,
         'logit_bias': logit_bias,
         'stop': getCustomStoppingStrings(openai_max_stop_strings),
@@ -4341,6 +4346,7 @@ function loadOpenAISettings(data, settings) {
     openai_setting_names = settingNames;
 
     migrateChatCompletionSettings(settings);
+    migrateLocalDialogueDefaults(settings);
 
     for (const key of Object.keys(default_settings)) {
         oai_settings[key] = settings[key] ?? default_settings[key];
@@ -7086,6 +7092,11 @@ export function initOpenAI() {
 
     $('#custom_api_url_text').on('input', function () {
         oai_settings.custom_url = String($(this).val());
+        saveSettingsDebounced();
+    });
+
+    $('#lmstudio_skip_reasoning').on('change', function () {
+        oai_settings.lmstudio_skip_reasoning = Boolean($(this).prop('checked'));
         saveSettingsDebounced();
     });
 

@@ -1,3 +1,4 @@
+import { prepareLocalDialogueParams } from '../../../public/scripts/local-dialogue-defaults.js';
 import fetch from 'node-fetch';
 import urlJoin from 'url-join';
 import { readSecret, SECRET_KEYS } from '../secrets.js';
@@ -34,6 +35,7 @@ export async function runCustomGeneration(input, user, signal, onProgress = () =
     params.n = 1;
     if (imageDescription) params = prepareImageDescriptionParams(params);
     if (/qwen3/i.test(String(params.model))) params.messages = ensureQwenUserQuery(params.messages, getConfigValue('promptPlaceholder', "Let's get started."));
+    if (!imageDescription) params = prepareLocalDialogueParams(params, body);
     onProgress({ event: 'modelPreparation' });
     if (body.lmstudio_match_context) await ensureLmStudioContext({ baseUrl: body.custom_url, model: body.model, contextLength: body.lmstudio_context_length, apiKey, fetchImpl: fetch, signal });
     onProgress({ event: 'modelRequest' });

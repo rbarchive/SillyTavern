@@ -2,7 +2,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import os from 'node:os';
+import { sessionCookieName } from './session-cookie.js';
 import process from 'node:process';
 import { Buffer } from 'node:buffer';
 
@@ -610,10 +610,7 @@ export function getPasswordSalt() {
  * @returns {string} The session name
  */
 export function getCookieSessionName() {
-    // Get server hostname and hash it to generate a session suffix
-    const hostname = os.hostname() || 'localhost';
-    const suffix = crypto.createHash('sha256').update(hostname).digest('hex').slice(0, 8);
-    return `session-${suffix}`;
+    return sessionCookieName(globalThis.DATA_ROOT);
 }
 
 export function getSessionCookieAge() {

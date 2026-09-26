@@ -1,3 +1,4 @@
+import { prepareLocalDialogueParams } from '../../../public/scripts/local-dialogue-defaults.js';
 /* eslint-disable dot-notation */
 import { createHmac } from 'node:crypto';
 import process from 'node:process';
@@ -2677,6 +2678,10 @@ router.post('/generate', async function (request, response) {
         if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM
             && /qwen3/i.test(String(requestBody.model))) {
             requestBody.messages = ensureQwenUserQuery(requestBody.messages, getConfigValue('promptPlaceholder', "Let's get started."));
+        }
+
+        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM && !isTextCompletion) {
+            Object.assign(requestBody, prepareLocalDialogueParams(requestBody, request.body));
         }
 
         /** @type {import('node-fetch').RequestInit} */
