@@ -1,3 +1,4 @@
+import { applyLocalImagePreset } from './local-image-preset.js';
 import { Popper } from '../../../lib.js';
 import {
     animation_duration,
@@ -251,7 +252,7 @@ const defaultSettings = {
     // Image dimensions (Width & Height)
     dimension_min: 64,
     dimension_max: 2048,
-    dimension_step: 64,
+    dimension_step: 8,
     width: 512,
     height: 512,
 
@@ -470,6 +471,10 @@ async function loadSettings() {
         if (extension_settings.sd[key] === undefined) {
             extension_settings.sd[key] = value;
         }
+    }
+
+    if (applyLocalImagePreset(extension_settings.sd)) {
+        saveSettingsDebounced();
     }
 
     if (extension_settings.sd.prompts === undefined) {

@@ -674,5 +674,9 @@
     {
         "filename": "errors/url-not-found.html",
         "type": "error_page"
+    },
+    {
+        "filename": "Local_SDXL_Turbo_Selectable.json",
+        "type": "workflow"
     }
 ]
