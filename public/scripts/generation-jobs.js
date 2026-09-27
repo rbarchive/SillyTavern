@@ -1,11 +1,15 @@
 import { uuidv4 } from './utils.js';
 import { characters, this_chid, chat, chat_metadata, getRequestHeaders, loadGenerationJobResult, eventSource, event_types, is_send_press, applyGenerationJobResult } from '../script.js';
 import { selected_group, groups } from './group-chats.js';
+import { failureNotices, generationFailureMessage } from './generation-job-notifications.js';
 
 const terminal = new Set(['completed', 'failed', 'conflict', 'cancelled', 'interrupted']);
 const observed = new Set();
 const waiting = new Set();
 let recovering = false;
+let noticeStorage;
+try { noticeStorage = window.sessionStorage; } catch { /* Storage can be disabled. */ }
+const notifiedFailures = failureNotices(noticeStorage);
 
 export function generationOrigin() {
     const file = selected_group ? groups.find(g => g.id === selected_group)?.chat_id : characters[this_chid]?.chat;
@@ -73,7 +77,10 @@ export async function runGenerationJob(payload, signal, onProgress = () => {}) {
             }
         }
         if (job.status === 'cancelled') throw new DOMException('Stopped by user', 'AbortError');
-        if (job.status !== 'completed') throw new Error(job.error || '생성 결과를 원래 이야기에 저장하지 못했습니다.');
+        if (job.status !== 'completed') {
+            notifiedFailures.add(job.id);
+            throw new Error(generationFailureMessage(job.error || '생성 결과를 원래 이야기에 저장하지 못했습니다.'));
+        }
         if (sameOrigin(origin)) {
             clearPreview();
             if (await loadGenerationJobResult(job)) {
@@ -140,8 +147,9 @@ async function recoverGenerationJobs() {
                     refreshed = true;
                 }
                 if (!await applyGenerationJobResult(job, job.operation === 'append' ? 'normal' : job.operation)) continue;
-            } else if (job.status !== 'cancelled') {
-                toastr.error(job.error || '생성 작업이 완료되지 않았습니다.', '백그라운드 생성');
+            } else if (job.status !== 'cancelled' && !notifiedFailures.has(job.id)) {
+                toastr.error(generationFailureMessage(job.error), '저장된 생성 작업 오류');
+                notifiedFailures.add(job.id);
             }
             observed.add(job.id);
         }

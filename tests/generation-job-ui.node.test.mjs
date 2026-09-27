@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { failureNotices, generationFailureMessage } from '../public/scripts/generation-job-notifications.js';
 // Execute the actual UI entry functions with controlled I/O and delayed hooks.
 const source = fs.readFileSync(new URL('../public/script.js', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 function entry(name, context) {
@@ -76,4 +77,26 @@ test('image completion retains the already rendered image without a second media
     c.updateMessageElement = () => { rebuilt++; };
     assert.equal(await entry('applyGenerationJobResult', c)({ ...job, result: { path: '/user/images/test.png' } }), true);
     assert.equal(rebuilt, 0); assert.equal(c.chat[0].extra.generation_job_processed, true);
+});
+
+test('loading a story observes a saved failure without starting a generation or repeating its toast after reload', async () => {
+    const browserSource = fs.readFileSync(new URL('../public/scripts/generation-jobs.js', import.meta.url), 'utf8');
+    const start = browserSource.indexOf('async function recoverGenerationJobs(');
+    const end = browserSource.indexOf('\n}', start) + 2;
+    let persisted, toasts = 0, requests = 0;
+    const storage = { getItem: () => persisted, setItem: (key, value) => { persisted = value; } };
+    const jobs = [{ id: 'old-overflow', origin: { file: 'A' }, status: 'failed', error: 'request (14104 tokens) exceeds the available context size (8192 tokens)' }];
+    function page() {
+        const c = { recovering: false, document: { hidden: false, querySelector: () => null }, observed: new Set(), waiting: new Set(), terminal: new Set(['failed']), is_send_press: false,
+            request: async (url, options) => { assert.equal(url, '/api/generation-jobs'); assert.equal(options, undefined); requests++; return jobs; },
+            sameOrigin: origin => origin.file === 'A', chat: [], clearPreview() {}, console,
+            notifiedFailures: failureNotices(storage), generationFailureMessage,
+            toastr: { error(message) { toasts++; assert.match(message, /토큰/); } },
+        };
+        return vm.runInNewContext(browserSource.slice(start, end) + '\nrecoverGenerationJobs', c);
+    }
+    const firstPage = page(); await firstPage(); await firstPage(); await page()();
+    assert.equal(toasts, 1); assert.equal(requests, 3);
+    jobs.push({ ...jobs[0], id: 'new-overflow' });
+    await page()(); assert.equal(toasts, 2);
 });

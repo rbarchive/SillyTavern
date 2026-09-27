@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { acceptJob, getJob, cancelJob, protectJobResults } from '../src/generation-jobs.js';
+import { acceptJob, getJob, cancelJob, protectJobResults, listJobSummaries } from '../src/generation-jobs.js';
 
 function fixture(t) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'generation-job-test-'));
@@ -26,6 +26,44 @@ async function finished(user, id) {
     throw new Error('job did not finish');
 }
 const output = { message: { mes: 'answer', is_user: false }, result: { text: 'answer' } };
+
+test('summary polling caches unchanged records, tracks changes and isolates users', async t => {
+    const f = fixture(t); const gate = deferred();
+    await acceptJob(f.user, { id: 'summary', origin: f.origin }, async () => { await gate.promise; return output; });
+    const file = path.join(f.user.directories.root, 'generation-jobs', 'summary.json');
+    const first = await listJobSummaries(f.user);
+    assert.equal(first[0].status, 'running');
+    assert.equal(first[0].anchor, undefined); assert.equal(first[0].message, undefined);
+    const originalRead = fs.promises.readFile; let reads = 0;
+    fs.promises.readFile = async (...args) => { if (args[0] === file) reads++; return originalRead(...args); };
+    try {
+        first[0].origin.file = 'mutated-client';
+        assert.equal((await listJobSummaries(f.user))[0].origin.file, 'chat');
+        assert.equal(reads, 0);
+        assert.deepEqual(await listJobSummaries(fixture(t).user), []);
+        gate.resolve(); await finished(f.user, 'summary');
+        assert.equal((await listJobSummaries(f.user))[0].status, 'completed');
+        assert.equal(reads, 1);
+        const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+        record.status = 'failed'; record.error = 'externally changed';
+        fs.writeFileSync(file, JSON.stringify(record));
+        assert.equal((await listJobSummaries(f.user))[0].error, 'externally changed');
+        fs.unlinkSync(file);
+        assert.deepEqual(await listJobSummaries(f.user), []);
+    } finally { fs.promises.readFile = originalRead; gate.resolve(); }
+});
+
+test('summary discovery preserves restart recovery without calling a provider', async t => {
+    const f = fixture(t);
+    const directory = path.join(f.user.directories.root, 'generation-jobs');
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, 'interrupted.json'), JSON.stringify({ id: 'interrupted', status: 'running', createdAt: '2026-01-01T00:00:00Z', origin: f.origin }));
+    const [job] = await listJobSummaries(f.user);
+    assert.equal(job.status, 'interrupted');
+    assert.match(job.error, /Server restarted/);
+    assert.equal((await getJob(f.user, 'interrupted')).status, 'interrupted');
+    assert.equal((await listJobSummaries(f.user))[0].status, 'interrupted');
+});
 
 test('accepted work survives requester departure, deduplicates and protects stale saves', async t => {
     const f = fixture(t); const gate = deferred(); let calls = 0;

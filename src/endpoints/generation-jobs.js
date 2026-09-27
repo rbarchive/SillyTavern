@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sanitize from 'sanitize-filename';
 import { sync as writeAtomic } from 'write-file-atomic';
-import { acceptJob, getJob, listJobs, cancelJob } from '../generation-jobs.js';
+import { acceptJob, getJob, listJobSummaries, cancelJob } from '../generation-jobs.js';
 import { runCustomGeneration } from './backends/durable-custom.js';
 import { runComfyGeneration } from './stable-diffusion.js';
 import { clientRelativePath } from '../util.js';
@@ -76,7 +76,7 @@ router.post('/', async (req, res) => {
     } catch (error) { res.status(400).send({ error: error.message }); }
 });
 router.get('/', async (req, res) => {
-    try { res.send((await listJobs(req.user)).map(job => publicGenerationJob(job, true))); } catch (error) { res.status(500).send({ error: error.message }); }
+    try { res.send(await listJobSummaries(req.user)); } catch (error) { res.status(500).send({ error: error.message }); }
 });
 router.get('/:id', async (req, res) => {
     try {
