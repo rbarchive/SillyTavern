@@ -5198,6 +5198,8 @@ a:hover {
 }
 
 .mes_img {
+    width: auto;
+    height: auto;
     max-width: 100%;
     max-height: 40vh;
     image-rendering: -webkit-optimize-contrast;
@@ -6461,4 +6463,94 @@ body:not(.movingUI) .drawer-content.maximized {
     .popup {
         border-width: 2px;
     }
+}
+
+/* Keep image actions usable without a hover gesture on phones and tablets. */
+.mes_img, .mes_img_controls .right_menu_button, .mes_img_swipes .right_menu_button,
+.img_enlarged, .sd_image_edit {
+    touch-action: manipulation;
+}
+.sd_image_edit_preview {
+    display: block;
+    max-width: 100%;
+    max-height: 35vh;
+    margin: 0 auto;
+    object-fit: contain;
+}
+.sd_image_edit[aria-busy="true"] {
+    opacity: 0.5;
+}
+@media (hover: none), (pointer: coarse) {
+    .mes_img_container .mes_img_controls, .mes_img_container .mes_img_swipes,
+    .mes_video_container .mes_video_controls, .mes_video_container .mes_img_swipes {
+        opacity: 1;
+        transition: none;
+    }
+    .mes_img_controls .right_menu_button, .mes_img_swipes .right_menu_button,
+    .mes_video_controls .right_menu_button {
+        min-width: 44px;
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .mes_img_controls .right_menu_button::before, .mes_img_swipes .right_menu_button::before,
+    .mes_video_controls .right_menu_button::before {
+        top: 0;
+    }
+    body:not(.sd) .sd_image_edit, .mes_img_controls .displayNone,
+    body:not(.caption) .mes_img_caption {
+        display: none;
+    }
+}
+
+@media (hover: none), (pointer: coarse) {
+    .sd_image_edit_popup .popup-controls .menu_button {
+        min-height: 44px;
+        min-width: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        touch-action: manipulation;
+    }
+}
+
+/* The conversation shows the image; selecting it reveals its actions. */
+#chat .mes_img_controls, #chat .mes_img_container .mes_img_swipes {
+    display: none;
+}
+.img_enlarged_actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+    padding: 8px;
+}
+.img_enlarged_actions .right_menu_button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    touch-action: manipulation;
+}
+.img_enlarged_actions .right_menu_button::before { top: 0; }
+.img_enlarged_actions .displayNone { display: none; }
+
+.img_enlarged_tools, .img_enlarged_navigation {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+.img_enlarged_tools { flex-wrap: wrap; }
+.img_enlarged_navigation { width: 100%; flex-wrap: nowrap; }
+.img_enlarged_navigation[hidden] { display: none; }
+.img_enlarged_counter { min-width: 52px; text-align: center; }
+
+.img_enlarged_navigation button.right_menu_button {
+    background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
+    color: var(--SmartThemeBodyColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    filter: none;
 }

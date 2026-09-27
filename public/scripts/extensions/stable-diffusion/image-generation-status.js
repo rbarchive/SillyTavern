@@ -2,11 +2,14 @@ import { t } from '../../i18n.js';
 
 const activeJobs = new Map();
 let statusElement;
+let timer;
 
 function renderStatus() {
     if (!activeJobs.size) {
         statusElement?.remove();
         statusElement = null;
+        clearInterval(timer);
+        timer = null;
         return;
     }
     if (!statusElement) {
@@ -20,7 +23,9 @@ function renderStatus() {
         statusElement.append(spinner, document.createElement('span'));
         document.getElementById('send_form')?.append(statusElement);
     }
-    const stage = Array.from(activeJobs.values()).at(-1);
+    const { message, startedAt } = Array.from(activeJobs.values()).at(-1);
+    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    const stage = `${message} · ${elapsed}초 경과`;
     statusElement.querySelector('span').textContent = activeJobs.size > 1
         ? `${stage} (${activeJobs.size})` : stage;
 }
@@ -28,12 +33,13 @@ function renderStatus() {
 /** Keep a visible status beside the composer for the entire image request. */
 export function beginImageGenerationStatus(message = t`Image generation: preparing description…`) {
     const job = Symbol('image-generation');
-    activeJobs.set(job, message);
+    activeJobs.set(job, { message, startedAt: Date.now() });
+    timer ??= setInterval(renderStatus, 1000);
     renderStatus();
     return {
         update(message) {
             if (!activeJobs.has(job)) return;
-            activeJobs.set(job, message);
+            activeJobs.get(job).message = message;
             renderStatus();
         },
         hide() {

@@ -886,12 +886,11 @@ function expandMessageMedia(messageId, mediaIndex) {
         return;
     }
 
-    const mediaAttachment = message.extra.media[mediaIndex];
-    const title = mediaAttachment.title || message.extra.title || '';
-
+    let mediaAttachment = message.extra.media[mediaIndex];
     if (!mediaAttachment) {
         return;
     }
+    const title = mediaAttachment.title || message.extra.title || '';
 
     if (mediaAttachment.type === MEDIA_TYPE.AUDIO) {
         console.warn('Audio media cannot be expanded');
@@ -905,6 +904,7 @@ function expandMessageMedia(messageId, mediaIndex) {
     function getMediaElement() {
         function getImageElement() {
             const img = document.createElement('img');
+            img.decoding = 'async';
             img.src = mediaAttachment.url;
             img.classList.add('img_enlarged');
             return img;
@@ -944,17 +944,84 @@ function expandMessageMedia(messageId, mediaIndex) {
         event.stopPropagation();
     });
 
-    if (title.trim().length > 0) {
-        const mediaTitlePre = document.createElement('pre');
-        const mediaTitleCode = document.createElement('code');
-        mediaTitleCode.classList.add('img_enlarged_title', 'txt');
-        mediaTitleCode.textContent = title;
-        mediaTitlePre.append(mediaTitleCode);
-        mediaTitleCode.addEventListener('click', event => {
-            event.stopPropagation();
-        });
-        mediaContainer.append(mediaTitlePre);
-        addCopyToCodeBlocks(mediaContainer);
+    const mediaTitlePre = document.createElement('pre');
+    const mediaTitleCode = document.createElement('code');
+    mediaTitleCode.classList.add('img_enlarged_title', 'txt', 'nohighlight');
+    mediaTitleCode.textContent = title;
+    mediaTitlePre.hidden = !title.trim();
+    mediaTitlePre.append(mediaTitleCode);
+    mediaTitleCode.addEventListener('click', event => event.stopPropagation());
+    mediaContainer.append(mediaTitlePre);
+    addCopyToCodeBlocks(mediaContainer);
+
+    // Navigate existing images in this popup; only other actions leave the viewer.
+    if (mediaAttachment.type === MEDIA_TYPE.IMAGE) {
+        const origin = getCurrentChatId();
+        const messageBlock = document.querySelector(`.mes[mesid="${messageId}"]`);
+        const toolbar = document.createElement('div');
+        toolbar.className = 'img_enlarged_actions';
+        toolbar.setAttribute('aria-label', '이미지 조작');
+        const actions = document.createElement('div');
+        actions.className = 'img_enlarged_tools';
+        const navigation = document.createElement('div');
+        navigation.className = 'img_enlarged_navigation';
+        const counter = document.createElement('span');
+        counter.className = 'img_enlarged_counter';
+        const isCurrent = () => origin === getCurrentChatId() && chat[messageId] === message
+            && message.extra.media[mediaIndex] === mediaAttachment && messageBlock?.isConnected;
+        const imageIndices = () => message.extra.media.flatMap((media, index) => media.type === MEDIA_TYPE.IMAGE ? [index] : []);
+        function refreshActions() {
+            actions.replaceChildren();
+            const sourceContainer = messageBlock?.querySelector(`.mes_media_container[data-index="${mediaIndex}"]`);
+            for (const original of sourceContainer?.querySelectorAll('.mes_img_controls .right_menu_button') || []) {
+                const action = original.cloneNode(true);
+                action.removeAttribute('id');
+                action.addEventListener('click', async event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (action.disabled) return;
+                    await popup.completeCancelled();
+                    if (!isCurrent() || !original.isConnected) return;
+                    original.click();
+                });
+                actions.append(action);
+            }
+            const indices = imageIndices();
+            counter.textContent = `${indices.indexOf(mediaIndex) + 1} / ${indices.length}`;
+            navigation.hidden = indices.length < 2;
+        }
+        function navigationButton(direction, icon, label) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = `right_menu_button fa-lg fa-solid ${icon} mes_img_swipe_${direction}`;
+            button.title = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!isCurrent()) return;
+                const indices = imageIndices();
+                const position = indices.indexOf(mediaIndex);
+                mediaIndex = indices[(position + (direction === 'left' ? -1 : 1) + indices.length) % indices.length];
+                mediaAttachment = message.extra.media[mediaIndex];
+                message.extra.media_index = mediaIndex;
+                appendMediaToMessage(message, $(messageBlock), SCROLL_BEHAVIOR.KEEP);
+                mediaElement.src = mediaAttachment.url;
+                mediaElement.classList.remove('zoomed');
+                const nextTitle = mediaAttachment.title || message.extra.title || '';
+                mediaTitleCode.textContent = nextTitle;
+                mediaTitlePre.hidden = !nextTitle.trim();
+                refreshActions();
+                // Render first; further taps remain available while saving.
+                await saveChatConditional();
+            });
+            return button;
+        }
+        navigation.append(navigationButton('left', 'fa-chevron-left', '이전 이미지'), counter,
+            navigationButton('right', 'fa-chevron-right', '다음 이미지'));
+        toolbar.append(actions, navigation);
+        refreshActions();
+        mediaContainer.prepend(toolbar);
     }
 
     const popup = new Popup(mediaContainer, POPUP_TYPE.DISPLAY, '', { large: true, transparent: true });
@@ -2051,6 +2118,8 @@ export function addDOMPurifyHooks() {
     });
 }
 
+const pendingImageSwipes = new WeakSet();
+
 /**
  * Switches an image to the next or previous one in the swipe list.
  * @param {number} messageId Message ID
@@ -2059,51 +2128,66 @@ export function addDOMPurifyHooks() {
  * @returns {Promise<void>}
  */
 async function onImageSwiped(messageId, element, direction) {
-    const animationClass = 'fa-fade';
-    const messageMedia = element.find('.mes_img, .mes_video');
+    const target = element.get(0);
+    if (pendingImageSwipes.has(target)) return;
+    pendingImageSwipes.add(target);
+    let ownsNavigationLock = true;
+    const origin = getCurrentChatId();
+    try {
+        const animationClass = 'fa-fade';
+        const messageMedia = element.find('.mes_img, .mes_video');
 
-    // Current image is already animating
-    if (messageMedia.hasClass(animationClass)) {
-        return;
+        // Current image is already animating
+        if (messageMedia.hasClass(animationClass)) {
+            return;
+        }
+
+        const message = chat[messageId];
+        const media = message?.extra?.media;
+
+        if (!message || !Array.isArray(media) || media.length === 0) {
+            console.warn('No media found in the message');
+            return;
+        }
+
+        const currentIndex = getMediaIndex(message);
+        const mediaDisplay = getMediaDisplay(message);
+
+        if (mediaDisplay !== MEDIA_DISPLAY.GALLERY) {
+            console.warn('Image swiping is only supported for gallery media display');
+            return;
+        }
+
+        const previousLength = media.length;
+        await eventSource.emit(event_types.IMAGE_SWIPED, { message, element, direction });
+        if (origin !== getCurrentChatId() || chat[messageId] !== message) return;
+        if (media.length !== previousLength || getMediaIndex(message) !== currentIndex) return;
+
+        if (media.length === 1) {
+            console.warn('Only one media item in the message, swiping is not applicable');
+            return;
+        }
+
+        // Switch to previous image or wrap around if at the beginning
+        if (direction === SWIPE_DIRECTION.LEFT) {
+            const newIndex = currentIndex === 0 ? media.length - 1 : currentIndex - 1;
+            message.extra.media_index = newIndex;
+        }
+
+        // Switch to next image or generate a new one if at the end
+        if (direction === SWIPE_DIRECTION.RIGHT) {
+            const newIndex = currentIndex === media.length - 1 ? 0 : currentIndex + 1;
+            message.extra.media_index = newIndex >= media.length ? 0 : newIndex;
+        }
+
+        appendMediaToMessage(message, element, SCROLL_BEHAVIOR.KEEP);
+        // Navigation remains available while immediate persistence is in flight.
+        pendingImageSwipes.delete(target);
+        ownsNavigationLock = false;
+        await saveChatConditional();
+    } finally {
+        if (ownsNavigationLock) pendingImageSwipes.delete(target);
     }
-
-    const message = chat[messageId];
-    const media = message?.extra?.media;
-
-    if (!message || !Array.isArray(media) || media.length === 0) {
-        console.warn('No media found in the message');
-        return;
-    }
-
-    const currentIndex = getMediaIndex(message);
-    const mediaDisplay = getMediaDisplay(message);
-
-    if (mediaDisplay !== MEDIA_DISPLAY.GALLERY) {
-        console.warn('Image swiping is only supported for gallery media display');
-        return;
-    }
-
-    await eventSource.emit(event_types.IMAGE_SWIPED, { message, element, direction });
-
-    if (media.length === 1) {
-        console.warn('Only one media item in the message, swiping is not applicable');
-        return;
-    }
-
-    // Switch to previous image or wrap around if at the beginning
-    if (direction === SWIPE_DIRECTION.LEFT) {
-        const newIndex = currentIndex === 0 ? media.length - 1 : currentIndex - 1;
-        message.extra.media_index = newIndex;
-    }
-
-    // Switch to next image or generate a new one if at the end
-    if (direction === SWIPE_DIRECTION.RIGHT) {
-        const newIndex = currentIndex === media.length - 1 ? 0 : currentIndex + 1;
-        message.extra.media_index = newIndex >= media.length ? 0 : newIndex;
-    }
-
-    await saveChatConditional();
-    appendMediaToMessage(message, element);
 }
 
 export function initChatUtilities() {
@@ -2351,7 +2435,7 @@ export function initChatUtilities() {
     });
     chatElement.on('click', '.mes_media_enlarge', async function () {
         const { messageId, mediaIndex } = getMediaContainerInfo.call(this);
-        expandMessageMedia(messageId, mediaIndex).click();
+        expandMessageMedia(messageId, mediaIndex)?.click();
     });
     chatElement.on('click', '.mes_media_delete', async function () {
         const { messageId, mediaIndex, messageBlock } = getMediaContainerInfo.call(this);

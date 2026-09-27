@@ -1,3 +1,4 @@
+import { imageEditSettings, imageEditInstruction, assertImageEditGraph } from './image-edit.js';
 import { runGenerationJob, generationOrigin } from '../../generation-jobs.js';
 import { applyLocalImagePreset } from './local-image-preset.js';
 import { applyLocalImageModel } from './local-image-models.js';
@@ -3370,7 +3371,7 @@ async function generateBackgroundImage(generationType, trigger, message, quietPr
     if (generationType === generationMode.FREE) prompt = generateFreeModePrompt(trigger, prefix => { negative = combinePrefixes(negative, prefix); });
     else if (generationType === generationMode.RAW_LAST) prompt = message || getRawLastMessage();
     else {
-        const prepared = await generateQuietPrompt({ quietPrompt, responseLength: 4096, prepareRequest: true });
+        const prepared = await generateQuietPrompt({ quietPrompt, responseLength: 4096, prepareRequest: true, omitMedia: true });
         if (!prepared?.request) throw new Error('이미지 묘사 요청을 준비하지 못했습니다.');
         chatRequest = prepared.request;
     }
@@ -3397,7 +3398,7 @@ async function generatePrompt(quietPrompt, descriptionSettings) {
     try {
         if (descriptionSettings) {
             if (main_api !== 'openai' || oai_settings.chat_completion_source !== 'custom' || selected_group) throw new Error('전용 이미지 묘사는 현재 Custom Chat Completion에 연결한 단일 이야기에서 사용할 수 있습니다.');
-            const prepared = await generateQuietPrompt({ quietPrompt, responseLength: 4096, prepareRequest: true });
+            const prepared = await generateQuietPrompt({ quietPrompt, responseLength: 4096, prepareRequest: true, omitMedia: true });
             if (!Array.isArray(prepared?.request?.messages)) throw new Error('이미지 묘사에 필요한 대화 정보를 준비하지 못했습니다.');
             const reply = await requestImageDescription('/api/image-description/generate', { settings: descriptionSettings, messages: prepared.request.messages });
             const processedReply = processReply(reply.text);
@@ -3405,7 +3406,7 @@ async function generatePrompt(quietPrompt, descriptionSettings) {
             return processedReply;
         }
         const concisePrompt = imageDescriptionInstruction(quietPrompt);
-        const reply = await generateQuietPrompt({ quietPrompt: concisePrompt, responseLength: 4096 });
+        const reply = await generateQuietPrompt({ quietPrompt: concisePrompt, responseLength: 4096, omitMedia: true });
         const processedReply = processReply(reply);
         if (!processedReply) {
             throw new Error(t`The chat model returned no image description. Check the model connection and try again.`);
@@ -4338,11 +4339,12 @@ async function generateAimlapiImage(prompt, signal) {
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
 async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuity, signal) {
+    const settings = imageContinuity?.imageEdit?.settings || extension_settings.sd;
     const workflowResponse = await fetch('/api/sd/comfy/workflow', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({
-            file_name: extension_settings.sd.comfy_workflow,
+            file_name: settings.comfy_workflow,
         }),
         signal,
     });
@@ -4352,6 +4354,7 @@ async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuit
     }
     let workflow = (await workflowResponse.json());
     const hasReference = workflow.includes('"%reference_image%"');
+    if (imageContinuity?.imageEdit && !hasReference) throw new Error('Image edit workflow must accept the selected image pixels.');
     if (hasReference) {
         imageContinuity ||= { chatId: getCurrentChatId(), origin: structuredClone(generationOrigin()), evidence: collectImageEvidence(getContext().chat) };
         if (!imageContinuity.contextResolved) {
@@ -4368,12 +4371,19 @@ async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuit
     }
     workflow = workflow.replaceAll('"%negative_prompt%"', JSON.stringify(negativePrompt));
 
-    const seed = extension_settings.sd.seed >= 0 ? extension_settings.sd.seed : Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
+    const seed = settings.seed >= 0 ? settings.seed : Math.round(Math.random() * Number.MAX_SAFE_INTEGER);
     workflow = workflow.replaceAll('"%seed%"', JSON.stringify(seed));
 
     // Empty latent text-to-image needs the full noise schedule. The UI value
     // applies to image-to-image samplers, which start from existing pixels.
     const graph = JSON.parse(workflow);
+    if (imageContinuity?.imageEdit) {
+        assertImageEditGraph(graph);
+        for (const node of Object.values(graph)) {
+            if (node.class_type === 'KSampler') node.inputs.denoise = settings.denoising_strength;
+        }
+        workflow = JSON.stringify(graph);
+    }
     let fixedEmptyLatent = false;
     for (const node of Object.values(graph)) {
         if (node.class_type === 'KSampler' && node.inputs?.denoise === '%denoise%'
@@ -4384,16 +4394,16 @@ async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuit
     }
     if (fixedEmptyLatent) workflow = JSON.stringify(graph);
 
-    const denoising_strength = extension_settings.sd.denoising_strength === undefined ? (hasReference ? 0.7 : 1.0) : extension_settings.sd.denoising_strength;
+    const denoising_strength = settings.denoising_strength === undefined ? (hasReference ? 0.7 : 1.0) : settings.denoising_strength;
     workflow = workflow.replaceAll('"%denoise%"', JSON.stringify(denoising_strength));
 
-    const clip_skip = isNaN(extension_settings.sd.clip_skip) ? -1 : -extension_settings.sd.clip_skip;
+    const clip_skip = isNaN(settings.clip_skip) ? -1 : -settings.clip_skip;
     workflow = workflow.replaceAll('"%clip_skip%"', JSON.stringify(clip_skip));
 
     placeholders.forEach(ph => {
-        workflow = workflow.replaceAll(`"%${ph}%"`, JSON.stringify(extension_settings.sd[ph]));
+        workflow = workflow.replaceAll(`"%${ph}%"`, JSON.stringify(settings[ph]));
     });
-    (extension_settings.sd.comfy_placeholders ?? []).forEach(ph => {
+    (settings.comfy_placeholders ?? []).forEach(ph => {
         workflow = workflow.replaceAll(`"%${ph.find}%"`, JSON.stringify(substituteParams(ph.replace)));
     });
     if (/%user_avatar%/gi.test(workflow)) {
@@ -4424,9 +4434,7 @@ async function prepareComfyWorkflow(negativePrompt, placeholders, imageContinuit
 async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath, placeholders, url, imageContinuity) {
     const boost = imageBoostEnabled(extension_settings.sd);
     const workflow = (await prepareComfyWorkflow(negativePrompt, placeholders, imageContinuity, signal)).replaceAll('"%prompt%"', JSON.stringify(prompt));
-    console.log(`{
-        "prompt": ${workflow}
-    }`);
+    console.log('ComfyUI workflow prepared');
     assertImageGenerationOrigin(imageContinuity);
     signal?.throwIfAborted();
     const promptResult = await fetch(`${basePath}/generate`, {
@@ -5197,8 +5205,13 @@ async function addSDGenButtons() {
     });
 
     $(document).on('click', '.sd_message_gen', (e) => sdMessageButton($(e.currentTarget), { animate: false }));
+    $(document).on('click', '.sd_image_edit', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        editGeneratedImage($(e.currentTarget));
+    });
 
-    $(document).on('click touchend', function (e) {
+    $(document).on('click', function (e) {
         const target = $(e.target);
         if (target.is(dropdown) || target.closest(dropdown).length) return;
         if ((target.is(button) || target.closest(button).length) && !dropdown.is(':visible')) {
@@ -5215,7 +5228,7 @@ async function addSDGenButtons() {
         dropdown.fadeOut(animation_duration);
         const id = $(this).attr('id');
         if (id === 'sd_counterpart') {
-            executeSlashCommandsWithOptions('/imagine extend=true 현재 대화 상대의 외모와 복장. 대화와 세계관에서 나온 정보 및 현재 상황을 반영한 인물 그림');
+            executeSlashCommandsWithOptions('/imagine extend=true 현재 대화 상대를 중심으로, 대화와 세계관에서 확립된 외모와 현재 복장을 유지한 인물 그림. 마지막 대화의 내용을 짧게 축약하여 현재 순간의 한 장면으로 반영한다. 특히 마지막 대화에서 시각적으로 강조된 인물의 표정(눈, 눈썹, 입 모양), 시선 방향, 자세, 손과 몸의 구체적인 동작, 상대나 사물과의 접촉 및 위치 관계를 우선하여 자세히 묘사한다. 장소, 배경, 조명과 관련 소품은 장면을 이해하는 데 필요한 만큼 간결하게 포함한다. 대사와 내면 독백을 그대로 옮기거나 새로운 사건을 추가하지 말고, 대화에서 확인되는 눈에 보이는 모습과 행동으로 표현한다.');
             return;
         }
         const idParamMap = {
@@ -5300,6 +5313,145 @@ function isValidState() {
     }
 }
 
+/** One correction at a time; editing must never mutate global generation settings. */
+let imageEditInProgress = false;
+
+async function editGeneratedImage($button) {
+    if (imageEditInProgress) {
+        toastr.info('이미지 편집이 진행 중입니다. 완료 후 다시 요청해 주세요.');
+        return;
+    }
+    const context = getContext();
+    const messageElement = $button.closest('.mes');
+    const messageId = Number(messageElement.attr('mesid'));
+    const mediaElement = $button.closest('.mes_media_container');
+    const mediaIndex = Number(mediaElement.attr('data-index'));
+    const message = context.chat[messageId];
+    const attachment = message?.extra?.media?.[mediaIndex];
+    if (attachment?.type !== MEDIA_TYPE.IMAGE || attachment.source !== MEDIA_SOURCE.GENERATED) return;
+
+    const snapshot = { chatId: getCurrentChatId(), origin: structuredClone(generationOrigin()) };
+    const source = structuredClone(attachment);
+    const image = mediaElement.find('.mes_img').get(0);
+    if (image?.naturalWidth && image?.naturalHeight) {
+        source.width = image.naturalWidth;
+        source.height = image.naturalHeight;
+    }
+    const settings = structuredClone(extension_settings.sd);
+    const controller = new AbortController();
+    const assertTarget = () => {
+        controller.signal.throwIfAborted();
+        assertImageGenerationOrigin(snapshot);
+        if (getContext().chat[messageId] !== message || !message.extra.media.includes(attachment)
+            || attachment.url !== source.url || attachment.title !== source.title) {
+            throw new Error('편집 대상 이미지가 변경되었습니다. 해당 이미지에서 다시 요청해 주세요.');
+        }
+        if (extension_settings.sd.source !== settings.source || extension_settings.sd.comfy_url !== settings.comfy_url
+            || extension_settings.sd.comfy_type !== settings.comfy_type) {
+            throw new Error('이미지 생성 연결이 변경되었습니다. 다시 요청해 주세요.');
+        }
+    };
+    let loaderHandle = ActionLoaderHandle.EMPTY;
+    let status;
+    imageEditInProgress = true;
+    $button.prop('disabled', true).attr('aria-busy', 'true');
+    try {
+        imageEditSettings(settings, source); // Fail before opening UI or invoking a model.
+        const content = document.createElement('div');
+        const preview = document.createElement('img');
+        preview.src = source.url;
+        preview.alt = '편집할 원본 이미지';
+        preview.className = 'sd_image_edit_preview';
+        preview.decoding = 'async';
+        const help = document.createElement('p');
+        help.textContent = '추가하거나 바꿀 내용을 적어 주세요. 예: 시선을 정면으로, 미소를 옅게, 오른손은 잔을 잡도록. 원본은 남기고 편집 결과를 추가합니다. 강도가 높을수록 다른 부분도 더 많이 바뀔 수 있습니다.';
+        const heading = document.createElement('h3');
+        heading.textContent = '이미지에 추가 요청';
+        content.append(heading, preview, help);
+        let strength = 0.55;
+        const editPopup = new Popup(content, POPUP_TYPE.INPUT, '', {
+            rows: 4, okButton: '프롬프트에 반영', cancelButton: '취소',
+            customInputs: [{ id: 'sd_image_edit_strength', label: '변경 강도 (0.1–0.85)', type: 'number', min: 0.1, max: 0.85, step: 0.05, defaultState: '0.55' }],
+            onClose: popup => { strength = Number(popup.inputResults?.get('sd_image_edit_strength') ?? 0.55); },
+        });
+        editPopup.dlg.classList.add('sd_image_edit_popup');
+        editPopup.mainInput.setAttribute('aria-label', '이미지 수정 요청');
+        const correction = await editPopup.show();
+        if (!correction || !String(correction).trim()) return;
+        assertTarget();
+        const editSettings = imageEditSettings(settings, source, strength);
+        const evidence = collectImageEvidence(context.chat);
+        const reference = evidence.find(row => row.imageUrl === source.url);
+        if (!reference) throw new Error('선택한 이미지의 생성 묘사를 찾을 수 없습니다.');
+        status = beginImageGenerationStatus('이미지 편집: 추가 요청 반영 중…');
+        loaderHandle = loader.show({ blocking: false, slug: `${MODULE_NAME}-image-edit`, title: '이미지 편집',
+            message: '추가 요청을 묘사에 반영하는 중…', onStop: () => controller.abort('Aborted by user') });
+        const continuity = await prepareImageContinuity({ ...snapshot, chat: context.chat, evidence,
+            currentRequest: String(correction).trim(), appearanceContextApplied: true, allowAppearanceChanges: true,
+            emit: (event, payload) => eventSource.emit(event, payload),
+            isCurrent: (chatId, origin) => getCurrentChatId() === chatId && JSON.stringify(generationOrigin()) === JSON.stringify(origin),
+        });
+        assertTarget();
+        continuity.imageEdit = { reference: structuredClone(reference), settings: editSettings };
+        const instruction = `${continuity.instruction}\n${imageEditInstruction(source.title || '', String(correction).trim())}`;
+        const draft = await generatePrompt(instruction, imageDescriptionSnapshot(settings));
+        assertTarget();
+        await loaderHandle.hide();
+        loaderHandle = ActionLoaderHandle.EMPTY;
+        status.update('이미지 편집: 반영된 프롬프트 확인 중…');
+        const reviewContent = document.createElement('div');
+        const reviewHeading = document.createElement('h3');
+        reviewHeading.textContent = '수정 반영된 생성 프롬프트';
+        const reviewHelp = document.createElement('p');
+        reviewHelp.textContent = '요청을 반영한 영문 프롬프트입니다. 필요한 부분을 직접 다듬은 뒤 이미지 편집을 실행해 주세요.';
+        const requestSummary = document.createElement('blockquote');
+        requestSummary.textContent = String(correction).trim();
+        const originalPrompt = document.createElement('details');
+        const originalLabel = document.createElement('summary');
+        originalLabel.textContent = '원본 프롬프트';
+        const originalText = document.createElement('p');
+        originalText.textContent = source.title || '';
+        originalPrompt.append(originalLabel, originalText);
+        reviewContent.append(reviewHeading, reviewHelp, requestSummary, originalPrompt);
+        const promptPopup = new Popup(reviewContent, POPUP_TYPE.INPUT, draft, {
+            rows: 6, wide: true, okButton: '이 프롬프트로 이미지 편집', cancelButton: '취소',
+        });
+        promptPopup.dlg.classList.add('sd_image_edit_popup', 'sd_image_edit_prompt_popup');
+        promptPopup.mainInput.setAttribute('aria-label', '수정 반영된 생성 프롬프트');
+        const reviewedPrompt = await promptPopup.show();
+        if (!reviewedPrompt || !String(reviewedPrompt).trim()) return;
+        const prompt = String(reviewedPrompt).trim();
+        assertTarget();
+        const result = { type: MEDIA_TYPE.IMAGE, source: MEDIA_SOURCE.GENERATED, title: prompt,
+            negative: source.negative || '', generation_type: generationMode.FREE_EXTENDED,
+            width: editSettings.width, height: editSettings.height,
+            image_edit: { source_url: source.url, correction: String(correction).trim(), strength } };
+        const callback = (_a, _b, _c, _d, _e, _f, format, appliedContinuity) => {
+            if (isVideo(format)) throw new Error('이미지 편집에서 이미지가 아닌 결과를 받았습니다.');
+            result.image_context = structuredClone(appliedContinuity.provenance);
+        };
+        const characterName = context.groupId ? systemUserName : context.name2;
+        status.update('이미지 편집: 원본을 바탕으로 그리는 중…');
+        loaderHandle = loader.show({ blocking: false, slug: `${MODULE_NAME}-image-edit`, title: '이미지 편집',
+            message: '확인한 프롬프트로 그리는 중…', onStop: () => controller.abort('Aborted by user') });
+        result.url = await sendGenerationRequest(generationMode.FREE_EXTENDED, prompt, result.negative,
+            characterName, callback, initiators.wand, controller.signal, continuity);
+        assertTarget();
+        if (!result.url) return;
+        message.extra.media.push(result);
+        message.extra.media_index = message.extra.media.length - 1;
+        appendMediaToMessage(message, messageElement, SCROLL_BEHAVIOR.KEEP);
+        await context.saveChat();
+    } catch (error) {
+        if (!controller.signal.aborted) toastr.error(String(error?.message || error), '이미지 편집');
+    } finally {
+        imageEditInProgress = false;
+        $button.prop('disabled', false).removeAttr('aria-busy');
+        status?.hide();
+        await loaderHandle.hide();
+    }
+}
+
 /** @type {WeakMap<HTMLElement, AbortController>} */
 const buttonAbortControllers = new WeakMap();
 
@@ -5375,13 +5527,14 @@ async function sdMessageButton($icon, { animate } = {}) {
         $media = messageElement.find(`.mes_media_container[data-index="${index}"]`).find('.mes_img, .mes_video');
     }
 
-    const newMediaAttachment = await generateMediaSwipe(
-        selectedMedia,
-        message,
-        () => setBusyIcon(true),
-        () => setBusyIcon(false),
-        abortController,
-    );
+    let newMediaAttachment;
+    try {
+        newMediaAttachment = await generateMediaSwipe(
+            selectedMedia, message, () => setBusyIcon(true), () => setBusyIcon(false), abortController,
+        );
+    } finally {
+        buttonAbortControllers.delete($icon.get(0));
+    }
 
     if (!newMediaAttachment) {
         return;

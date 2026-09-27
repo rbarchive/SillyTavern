@@ -578,3 +578,8 @@ label[for="bind_preset_to_connection"]:has(input:checked) {
     color: var(--warning);
     margin-left: 5px;
 }
+
+/* Image corrections are available only while the image extension is enabled. */
+body:not(.sd) .sd_image_edit {
+    display: none;
+}

@@ -2226,10 +2226,25 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
     const hideMessageText = hasMedia && mes?.extra?.inline_image === false;
 
     const mediaBlocks = [];
-    const mediaPromises = [];
 
     const chatHeight = (hasMedia || hasFiles) ? chatElement.prop('scrollHeight') : 0;
     const scrollPosition = (hasMedia || hasFiles) ? chatElement.scrollTop() : 0;
+    const renderState = {};
+    mediaWrapper.data('mediaRenderState', renderState);
+    const wasAtBottom = chatHeight - scrollPosition - chatElement.innerHeight() <= 20;
+    let expectedScrollTop = scrollPosition;
+    let scrollFramePending = false;
+    const adjustAfterLoad = () => {
+        if (scrollBehavior !== SCROLL_BEHAVIOR.ADJUST || !wasAtBottom || scrollFramePending) return;
+        scrollFramePending = true;
+        requestAnimationFrame(() => {
+            scrollFramePending = false;
+            if (mediaWrapper.data('mediaRenderState') !== renderState || !mediaWrapper.get(0)?.isConnected
+                || Math.abs(chatElement.scrollTop() - expectedScrollTop) > 1) return;
+            chatElement.scrollTop(chatElement.prop('scrollHeight'));
+            expectedScrollTop = chatElement.scrollTop();
+        });
+    };
     const doAdjustScroll = () => {
         if (!hasMedia && !hasFiles) {
             return;
@@ -2262,26 +2277,20 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
         template.attr('data-index', index);
 
         const image = template.find('.mes_img');
+        image.attr({ loading: 'lazy', decoding: 'async', draggable: 'false' });
+        if (attachment.width && attachment.height) image.attr({ width: attachment.width, height: attachment.height });
+        template.find('.sd_image_edit').toggleClass('displayNone', attachment.source !== MEDIA_SOURCE.GENERATED);
         image.attr('src', attachment.url);
         image.attr('title', attachment.title || mes.extra.title || '');
-        mediaPromises.push(new Promise((resolve) => {
-            function onLoad() {
-                image.removeAttr('alt');
-                image.removeClass('error');
-                resolve();
-            }
-            function onError() {
-                image.attr('alt', '');
-                image.addClass('error');
-                resolve();
-            }
-            if (image.prop('complete')) {
-                onLoad();
-            } else {
-                image.off('load').on('load', onLoad);
-                image.off('error').on('error', onError);
-            }
-        }));
+        image.on('load', () => {
+            image.removeAttr('alt').removeClass('error');
+            adjustAfterLoad();
+        });
+        image.on('error', () => {
+            image.attr('alt', '').addClass('error');
+            adjustAfterLoad();
+        });
+        if (image.prop('complete') && image.prop('naturalWidth')) image.removeClass('error');
 
         mediaBlocks.push(template);
         return template;
@@ -2300,21 +2309,11 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
         const video = template.find('.mes_video');
         video.attr('src', attachment.url);
         video.attr('title', attachment.title || mes.extra.title || '');
-        mediaPromises.push(new Promise((resolve) => {
-            function onLoad() {
-                resolve();
-            }
-            function onError() {
-                video.addClass('error');
-                resolve();
-            }
-            if (video.prop('readyState') >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-                onLoad();
-            } else {
-                video.off('loadeddata').on('loadeddata', onLoad);
-                video.off('error').on('error', onError);
-            }
-        }));
+        video.on('loadedmetadata', adjustAfterLoad);
+        video.on('error', () => {
+            video.addClass('error');
+            adjustAfterLoad();
+        });
 
         mediaBlocks.push(template);
         return template;
@@ -2333,21 +2332,7 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
         audio.attr('src', attachment.url);
         audio.attr('title', attachment.title || mes.extra.title || '');
 
-        mediaPromises.push(new Promise((resolve) => {
-            function onLoad() {
-                resolve();
-            }
-            function onError() {
-                audio.addClass('error');
-                resolve();
-            }
-            if (audio.prop('readyState') >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-                onLoad();
-            } else {
-                audio.off('loadeddata').on('loadeddata', onLoad);
-                audio.off('error').on('error', onError);
-            }
-        }));
+        audio.on('error', () => audio.addClass('error'));
 
         new AudioPlayer(audio.get(0), template.get(0));
 
@@ -2468,13 +2453,13 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
         return;
     }
 
-    // TODO: Consider making this awaitable
-    Promise.race([Promise.all(mediaPromises), delay(debounce_timeout.short)]).then(() => {
-        const states = saveMediaStates();
-        mediaWrapper.empty().append(mediaBlocks);
-        restoreMediaStates(states);
-        doAdjustScroll();
-    });
+    // Insert immediately: network/decode and chat saving must not delay navigation.
+    // No deferred DOM swap can overwrite a newer selection after rapid taps.
+    const states = saveMediaStates();
+    mediaWrapper.empty().append(mediaBlocks);
+    restoreMediaStates(states);
+    doAdjustScroll();
+    expectedScrollTop = chatElement.scrollTop();
 }
 
 export function addCopyToCodeBlocks(messageElement) {
@@ -3072,6 +3057,7 @@ export function getStoppingStrings(isImpersonate, isContinue, api = main_api) {
  * @prop {string} [quietPrompt] Instruction prompt for the AI
  * @prop {boolean} [quietToLoud] Whether the message should be sent in a foreground (loud) or background (quiet) mode
  * @prop {boolean} [skipWIAN] Whether to skip addition of World Info and Author's Note into the prompt
+ * @prop {boolean} [omitMedia] Omit attached media from this text-only request
  * @prop {string} [quietImage] Image to use for the quiet prompt
  * @prop {string} [quietName] Name to use for the quiet prompt (defaults to "System:")
  * @prop {number} [responseLength] Maximum response length. If unset, the global default value is used.
@@ -3082,7 +3068,7 @@ export function getStoppingStrings(isImpersonate, isContinue, api = main_api) {
  * @param {GenerateQuietPromptParams} params Parameters for the quiet prompt generation
  * @returns {Promise<string>} Generated text. If using structured output, will contain a serialized JSON object.
  */
-export async function generateQuietPrompt({ quietPrompt = '', quietToLoud = false, skipWIAN = false, quietImage = null, quietName = null, responseLength = null, forceChId = null, jsonSchema = null, removeReasoning = true, trimToSentence = false, prepareRequest = false } = {}) {
+export async function generateQuietPrompt({ quietPrompt = '', quietToLoud = false, skipWIAN = false, quietImage = null, quietName = null, responseLength = null, forceChId = null, jsonSchema = null, removeReasoning = true, trimToSentence = false, prepareRequest = false, omitMedia = false } = {}) {
     if (arguments.length > 0 && typeof arguments[0] !== 'object') {
         console.trace('generateQuietPrompt called with positional arguments. Please use an object instead.');
         [quietPrompt, quietToLoud, skipWIAN, quietImage, quietName, responseLength, forceChId, jsonSchema] = arguments;
@@ -3102,6 +3088,7 @@ export async function generateQuietPrompt({ quietPrompt = '', quietToLoud = fals
             force_chid: forceChId ?? null,
             jsonSchema: jsonSchema ?? null,
             prepareRequest,
+            omitMedia,
         };
         if (responseLengthCustomized) {
             TempResponseLength.save(main_api, responseLength);
@@ -4276,6 +4263,7 @@ function removeLastMessage() {
  * @property {boolean} [skipWIAN] Skip adding World Info and Author's Note to the prompt.
  * @property {number} [force_chid] Force character ID to use for the generation. Only works in groups.
  * @property {AbortSignal} [signal] Abort signal to cancel the generation. If not provided, will create a new AbortController.
+ * @property {boolean} [omitMedia] Omit attached media from text-only requests
  * @property {string} [quietImage] Image URL to use for the quiet prompt (defaults to empty string)
  * @property {string} [quietName] Name to use for the quiet prompt (defaults to "System:")
  * @property {number} [depth] Recursion depth for the generation. Used to prevent infinite loops in tool calls.
@@ -4290,7 +4278,7 @@ function removeLastMessage() {
  * @param {boolean} dryRun Whether to actually generate a message or just assemble the prompt
  * @returns {Promise<any>} Returns a promise that resolves when the text is done generating.
  */
-export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, prepareRequest = false } = {}, dryRun = false) {
+export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, prepareRequest = false, omitMedia = false } = {}, dryRun = false) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -4353,7 +4341,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     if (selected_group && !is_group_generating) {
         if (!dryRun) {
             // Returns the promise that generateGroupWrapper returns; resolves when generation is done
-            return generateGroupWrapper(false, type, { quiet_prompt, force_chid, signal: abortController.signal, quietImage, jsonSchema });
+            return generateGroupWrapper(false, type, { quiet_prompt, force_chid, signal: abortController.signal, quietImage, jsonSchema, omitMedia });
         }
 
         const characterIndexMap = new Map(characters.map((char, index) => [char.avatar, index]));
@@ -4834,7 +4822,10 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     let oaiMessageExamples = [];
 
     if (main_api === 'openai') {
-        oaiMessages = setOpenAIMessages(coreChat);
+        // Text description requests keep dialogue facts without encoding attached pixels.
+        oaiMessages = setOpenAIMessages(omitMedia ? coreChat.map(message => ({
+            ...message, extra: { ...message.extra, media: [] },
+        })) : coreChat);
         oaiMessageExamples = setOpenAIMessageExamples(mesExamplesArray);
     }
 

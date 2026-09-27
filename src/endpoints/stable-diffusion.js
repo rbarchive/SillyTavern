@@ -1,3 +1,4 @@
+import { prepareInlineComfyImages } from '../comfy-inline-images.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -574,7 +575,7 @@ async function executeComfyGeneration(body, signal, onSubmitted = () => {}) {
             signal,
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: body.prompt,
+            body: await prepareInlineComfyImages(body.prompt, body.url, signal),
         });
         if (!promptResult.ok) {
             const text = await promptResult.text();
@@ -639,21 +640,24 @@ comfy.post('/generate', async (request, response) => {
             return;
         }
         let item;
+        let submittedId;
         const url = new URL(urlJoin(request.body.url, '/prompt'));
 
         const controller = new AbortController();
         request.socket.removeAllListeners('close');
         request.socket.on('close', function () {
-            if (!response.writableEnded && !item) {
-                const interruptUrl = new URL(urlJoin(request.body.url, '/interrupt'));
-                fetch(interruptUrl, { method: 'POST', headers: { 'Authorization': getBasicAuthHeader(request.body.auth) } });
+            if (!response.writableEnded && !item && submittedId) {
+                // Cancel only this queued request; never interrupt another user's inference.
+                const queueUrl = new URL(urlJoin(request.body.url, '/queue'));
+                fetch(queueUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ delete: [submittedId] }) }).catch(() => {});
             }
             controller.abort();
         });
 
         const promptResult = await fetch(url, {
+            signal: controller.signal,
             method: 'POST',
-            body: request.body.prompt,
+            body: await prepareInlineComfyImages(request.body.prompt, request.body.url, controller.signal),
         });
         if (!promptResult.ok) {
             const text = await promptResult.text();
@@ -662,10 +666,10 @@ comfy.post('/generate', async (request, response) => {
 
         /** @type {any} */
         const data = await promptResult.json();
-        const id = data.prompt_id;
+        const id = submittedId = data.prompt_id;
         const historyUrl = new URL(urlJoin(request.body.url, `/history/${id}`));
         while (true) {
-            const result = await fetch(historyUrl);
+            const result = await fetch(historyUrl, { signal: controller.signal });
             if (!result.ok) {
                 throw new Error('ComfyUI returned an error.');
             }
@@ -695,7 +699,7 @@ comfy.post('/generate', async (request, response) => {
         }
         const imgUrl = new URL(urlJoin(request.body.url, '/view'));
         imgUrl.search = `?filename=${imgInfo.filename}&subfolder=${imgInfo.subfolder}&type=${imgInfo.type}`;
-        const imgResponse = await fetch(imgUrl);
+        const imgResponse = await fetch(imgUrl, { signal: controller.signal });
         if (!imgResponse.ok) {
             throw new Error('ComfyUI returned an error.');
         }
