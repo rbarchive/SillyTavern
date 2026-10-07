@@ -1,10 +1,16 @@
 const storageKey = 'generation-job-failure-notices';
 
 /** Keep only receipt IDs; never put prompts, errors, or chat contents in storage. */
-export function failureNotices(storage) {
+export function failureNotices(storage, previousStorage) {
     let receipts;
     try { receipts = JSON.parse(storage?.getItem(storageKey) || '[]'); } catch { receipts = []; }
-    const ids = new Set(Array.isArray(receipts) ? receipts.filter(id => typeof id === 'string').slice(-2000) : []);
+    let previous;
+    try { previous = JSON.parse(previousStorage?.getItem(storageKey) || '[]'); } catch { previous = []; }
+    const ids = new Set([...(Array.isArray(receipts) ? receipts : []), ...(Array.isArray(previous) ? previous : [])]
+        .filter(id => typeof id === 'string').slice(-2000));
+    if (previousStorage && previousStorage !== storage) {
+        try { storage?.setItem(storageKey, JSON.stringify([...ids])); } catch { /* In-memory deduplication still works. */ }
+    }
     return {
         has: id => ids.has(id),
         add(id) {

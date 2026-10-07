@@ -105,3 +105,44 @@ test('stream preview is observable before completion and disconnect does not los
         assert.equal(fs.readFileSync(file, 'utf8').split('\n').map(JSON.parse).filter(row => row.extra?.generation_job === 'preview').length, 1);
     } finally { release(); server.closeAllConnections(); upstream.closeAllConnections(); await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => upstream.close(resolve))]); fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('World tools finish server-side after observer disconnect; approval and duplicate acceptance are safe', async t => {
+    const { WORLD_TOOL_ADAPTER } = await import('../src/endpoints/backends/world-tool-runner.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'world-durable-http-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const user = { directories: { root, chats: path.join(root, 'chats'), secrets: path.join(root, 'secrets.json') } };
+    const file = path.join(root, 'chats', 'world', 'world-chat.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, [{ chat_metadata: { integrity: 'world-id' } }, { mes: '설정 확인 후 저장해 주세요.', is_user: true }].map(JSON.stringify).join('\n'));
+    let rounds = 0, writes = 0;
+    globalThis[WORLD_TOOL_ADAPTER] = { prepare: () => ({ world: 'fixture' }), validate() {}, mode: (_scope,name) => name === 'Save' ? 'approval' : 'server', async invoke(_scope,name) { if (name === 'Save') writes++; return { saved: name === 'Save' }; } };
+    t.after(() => { delete globalThis[WORLD_TOOL_ADAPTER]; });
+    const provider = express(); provider.use(express.json());
+    provider.post('/chat/completions', async (_req,res) => {
+        assert.deepEqual(_req.body.tools.map(t=>t.function.name),['Read','Save']);
+        if (rounds > 0) assert.ok(_req.body.messages.some(m=>m.role==='tool'));
+        rounds++; await delay(50); res.set('Content-Type','text/event-stream');
+        const delta = rounds <= 2 ? { tool_calls: [{ index: 0, id: 'call-'+rounds, type: 'function', function: { name: rounds === 1 ? 'Read' : 'Save', arguments: '{}' } }] } : { content: '세계관 설정 저장 완료.' };
+        res.end('data: '+JSON.stringify({ choices:[{ delta, finish_reason: rounds <= 2 ? 'tool_calls' : 'stop' }] })+'\n\ndata: [DONE]\n\n');
+    });
+    const p = provider.listen(0,'127.0.0.1'); await new Promise(resolve => p.once('listening',resolve)); t.after(()=>p.close());
+    const app = express(); app.use(express.json()); app.use((req,_res,next)=>{req.user=user; next();}); app.use('/jobs',router);
+    const server = app.listen(0,'127.0.0.1'); await new Promise(resolve=>server.once('listening',resolve)); t.after(()=>server.close());
+    const base = 'http://127.0.0.1:'+server.address().port+'/jobs';
+    const payload = { id:'world-http', kind:'chat', origin:{avatar:'world.png',file:'world-chat',integrity:'world-id',expectedLength:2}, message:{name:'World',mes:'',is_user:false},
+      chatRequest:{chat_completion_source:'custom',rp_world_background:true,custom_url:'http://127.0.0.1:'+p.address().port,model:'fixture',stream:true,custom_include_body:'messages: [{role: user, content: overwritten}]\ntools: []',custom_exclude_body:'[messages, tools]',messages:[{role:'user',content:'확인 후 저장'}],tools:['Read','Save'].map(name=>({type:'function',function:{name,parameters:{type:'object'}}}))} };
+    const post = (route,body)=>fetch(base+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    assert.equal((await post('',payload)).status,202);
+    // The submitting observer does not poll while the server reads and waits.
+    await delay(250);
+    let job = await (await fetch(base+'/world-http')).json();
+    assert.equal(job.progress.phase,'awaiting-confirmation'); assert.equal(rounds,2); assert.equal(writes,0);
+    assert.equal((await post('',payload)).status,202); assert.equal(rounds,2);
+    const token=job.toolPending.token;
+    assert.equal((await post('/world-http/tool-decision',{token,approved:true})).status,200);
+    assert.equal((await post('/world-http/tool-decision',{token,approved:true})).status,409);
+    for(let i=0;i<50;i++){job=await(await fetch(base+'/world-http')).json();if(job.status==='completed')break;await delay(20);}
+    assert.equal(job.status,'completed'); assert.equal(writes,1); assert.equal(rounds,3); assert.equal(job.toolReceipts.length,2);
+    const rows=fs.readFileSync(file,'utf8').split('\n').map(JSON.parse);
+    assert.equal(rows.length,3);assert.equal(rows[2].mes,'세계관 설정 저장 완료.');
+});

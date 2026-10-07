@@ -22,7 +22,7 @@ const canonical = () => ({ scope: { worldId: 'world', storyId: 'story', branchId
 function fixture({ durable = false, emitOverride, fail = false, switchOnSave = false } = {}) {
     const context = { chatId: 'original', chat: history(), characters: [{ name: 'Hero' }], characterId: 0, name2: 'Narrator',
         addOneMessage: noop, scrollOnMediaLoad: noop, saveChat: async () => { if (switchOnSave) context.chatId = 'switched'; } };
-    const requests = [], jobs = [], callbacks = [];
+    const requests = [], jobs = [], callbacks = [], uiEvents = [];
     const modes = { TOOL: -2, MESSAGE: -1, CHARACTER: 0, USER: 1, SCENARIO: 2, RAW_LAST: 3, NOW: 4, FACE: 5, FREE: 6, BACKGROUND: 7, CHARACTER_MULTIMODAL: 8, USER_MULTIMODAL: 9, FACE_MULTIMODAL: 10, FREE_EXTENDED: 11 };
     const prompts = Object.fromEntries(Object.values(modes).map(mode => [mode, 'Describe {0}']));
     prompts[-1] = '{{prompt}}';
@@ -41,15 +41,15 @@ function fixture({ durable = false, emitOverride, fail = false, switchOnSave = f
         } } },
         event_types: { SD_PROMPT_PROCESSING: 'process', FORCE_SET_BACKGROUND: 'background', MESSAGE_RECEIVED: 'received', CHARACTER_MESSAGE_RENDERED: 'rendered' },
         isValidState: () => true, ensureSelectionExists: noop, isTrueBoolean: value => value === true, isFalseBoolean: value => value === false,
-        setTypeSpecificDimensions: () => ({}), restoreOriginalDimensions: noop, ActionLoaderHandle: { EMPTY: handle }, loader: { show: () => handle },
-        beginImageGenerationStatus: () => ({ update: noop, hide: noop }), selected_group: null, this_chid: 0, main_api: durable ? 'openai' : 'other', oai_settings: { chat_completion_source: 'custom' },
+        setTypeSpecificDimensions: () => ({}), restoreOriginalDimensions: noop, ActionLoaderHandle: { EMPTY: handle }, loader: { show: () => { uiEvents.push('toast'); return handle; } },
+        beginImageGenerationStatus: () => ({ update: noop, hide: () => uiEvents.push('inline-hidden') }), selected_group: null, this_chid: 0, main_api: durable ? 'openai' : 'other', oai_settings: { chat_completion_source: 'custom' },
         combinePrefixes: (...args) => args.filter(Boolean).join(', '), getCharacterPrefix: () => '', getCharacterNegativePrefix: () => '',
         substituteParams: value => value, substituteParamsExtended: (value, params) => value.replaceAll('{{prompt}}', params.prompt).replaceAll('{{prefixedPrompt}}', params.prefixedPrompt),
         stringFormat: (value, trigger) => value.replace('{0}', trigger), generateFreeModePrompt: value => value, getRawLastMessage: () => 'Raw unchanged',
         refinePrompt: async value => value, processReply: value => value,
         generateQuietPrompt: async options => { requests.push(options); return options.prepareRequest ? { request: { messages: [{ role: 'user', content: options.quietPrompt }] } } : 'black hair, garden'; },
         prepareComfyWorkflow: async () => '{"text":"%prompt%"}', getVisibilityByInitiator: () => true, getMessageTimeStamp: () => 'synthetic', systemUserName: 'System',
-        runGenerationJob: async payload => { jobs.push(payload); return { result: { path: '/durable.png' } }; },
+        runGenerationJob: async (payload,_signal,onProgress) => { jobs.push(payload); onProgress({ id: 'job', status: 'running' }); return { result: { path: '/durable.png' } }; },
         generateExtrasImage: async () => { if (fail) throw new Error('Synthetic endpoint failure'); return { data: 'pixel', format: 'png' }; },
         saveBase64AsFile: async () => { if (switchOnSave) context.chatId = 'switched'; return '/success.png'; },
         humanizedDateTime: () => 'synthetic', isVideo: () => false, MEDIA_TYPE: { IMAGE: 'image', VIDEO: 'video' }, MEDIA_SOURCE: { GENERATED: 'generated' }, MEDIA_DISPLAY: { GALLERY: 'gallery' },
@@ -60,8 +60,19 @@ function fixture({ durable = false, emitOverride, fail = false, switchOnSave = f
     for (const name of ['getGenerationType', 'getQuietPrompt', 'getPrompt', 'imageDescriptionInstruction', 'assertImageGenerationOrigin', 'generateBackgroundImage', 'generatePrompt', 'sendGenerationRequest', 'sendMessage', 'generatePicture']) {
         vm.runInContext(extract(name), sandbox);
     }
-    return { sandbox, context, requests, jobs, callbacks, modes };
+    return { sandbox, context, requests, jobs, callbacks, modes, uiEvents };
 }
+
+test('durable image uses inline preparation then one persistent progress row without a duplicate toast', async () => {
+    const durable = fixture({ durable: true });
+    await durable.sandbox.generatePicture('tool', {}, 'Portrait at the garden');
+    assert.ok(durable.jobs.length > 0);
+    assert.equal(durable.uiEvents.includes('toast'), false);
+    assert.ok(durable.uiEvents.includes('inline-hidden'));
+    const foreground = fixture();
+    await foreground.sandbox.generatePicture('tool', {}, 'Portrait at the garden');
+    assert.ok(foreground.uiEvents.includes('toast'));
+});
 
 test('actual foreground and durable description requests include canonical appearance and A/B/C evidence', async () => {
     for (const durable of [false, true]) {

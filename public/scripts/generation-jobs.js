@@ -1,15 +1,23 @@
+import { ToolManager } from './tool-calling.js';
 import { uuidv4 } from './utils.js';
-import { characters, this_chid, chat, chat_metadata, getRequestHeaders, loadGenerationJobResult, eventSource, event_types, is_send_press, applyGenerationJobResult } from '../script.js';
+import { characters, this_chid, chat, chat_metadata, getRequestHeaders, loadGenerationJobResult, eventSource, event_types, is_send_press, applyGenerationJobResult, stopGeneration } from '../script.js';
 import { selected_group, groups } from './group-chats.js';
 import { failureNotices, generationFailureMessage } from './generation-job-notifications.js';
+import { correctKoreanDialogueDisplay } from './korean-dialogue-display.js';
+import { generationProgressDisplay, visibleGenerationJobs } from './generation-progress-display.js';
 
 const terminal = new Set(['completed', 'failed', 'conflict', 'cancelled', 'interrupted']);
 const observed = new Set();
 const waiting = new Set();
 let recovering = false;
+let knownJobs = [];
+let foregroundGeneration = null;
+const decidingTools = new Set();
 let noticeStorage;
-try { noticeStorage = window.sessionStorage; } catch { /* Storage can be disabled. */ }
-const notifiedFailures = failureNotices(noticeStorage);
+let previousNoticeStorage;
+try { previousNoticeStorage = window.sessionStorage; } catch { /* Storage can be disabled. */ }
+try { noticeStorage = window.localStorage; } catch { /* Fall back to tab-local receipts. */ }
+const notifiedFailures = failureNotices(noticeStorage || previousNoticeStorage, previousNoticeStorage);
 
 export function generationOrigin() {
     const file = selected_group ? groups.find(g => g.id === selected_group)?.chat_id : characters[this_chid]?.chat;
@@ -31,14 +39,35 @@ function showPreview(job) {
         element.setAttribute('role', 'status');
         document.querySelector('#chat')?.append(element);
     }
-    element.textContent = job.preview;
+    element.textContent = correctKoreanDialogueDisplay(job.preview, { streaming: !terminal.has(job.status) });
     if (atBottom) container.scrollTop = container.scrollHeight;
+    return element;
+}
+async function resolvePendingTool(job, approved) {
+    if (!sameOrigin(job.origin) || decidingTools.has(job.id)) return;
+    decidingTools.add(job.id);
+    const pending = job.toolPending;
+    try {
+        if (pending.mode === 'client') {
+            const matchesScope = globalThis[Symbol.for('sillytavern.rpMemoryBackgroundScope')];
+            if (typeof matchesScope !== 'function' || !matchesScope(pending.scope)) throw new Error('세계관 연결을 확인 중입니다. 원래 대화에서 다시 실행해 주세요.');
+            await request(`/api/generation-jobs/${job.id}/tool-decision`, { method: 'POST', body: JSON.stringify({ token: pending.token, claim: true }) });
+            if (!sameOrigin(job.origin) || !matchesScope(pending.scope)) throw new Error('원래 대화에서 도구 실행을 완료해 주세요.');
+            const value = await ToolManager.invokeFunctionTools({ choices: [{ index: 0, message: { tool_calls: [{ id: pending.token, type: 'function', function: { name: pending.name, arguments: pending.arguments } }] } }] });
+            const result = value.invocations?.[0]?.result || value.errors?.[0]?.message || '도구 실행 결과가 없습니다. 실행 완료로 간주하지 마세요.';
+            await request(`/api/generation-jobs/${job.id}/tool-decision`, { method: 'POST', body: JSON.stringify({ token: pending.token, result: String(result) }) });
+            await globalThis[Symbol.for('sillytavern.rpMemoryBackgroundNavigation')]?.();
+        } else {
+            await request(`/api/generation-jobs/${job.id}/tool-decision`, { method: 'POST', body: JSON.stringify({ token: pending.token, approved }) });
+        }
+    } catch (error) { toastr.error(error.message, '세계관 도구 처리'); }
+    finally { decidingTools.delete(job.id); recoverGenerationJobs(); }
 }
 function clearPreview() { document.getElementById('generation_preview')?.remove(); }
 function reportTiming(job, started, preparationMs) {
     console.info('Generation timing (milliseconds)', JSON.stringify({ id: job.id, server: job.timings, preparation: preparationMs, observer: Math.round(performance.now() - started) }));
 }
-const pause = () => new Promise(resolve => setTimeout(resolve, 1000));
+const pause = (ms = 1000) => new Promise(resolve => setTimeout(resolve, ms));
 async function request(url, options = {}) {
     const response = await fetch(url, { ...options, headers: getRequestHeaders() });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Generation request HTTP ${response.status}`);
@@ -51,6 +80,7 @@ export async function runGenerationJob(payload, signal, onProgress = () => {}) {
     const id = uuidv4();
     const origin = payload.origin || generationOrigin();
     let job;
+    let previewRecorded = false;
     let cancelRequested = false;
     const cancel = () => { cancelRequested = true; request(`/api/generation-jobs/${id}/cancel`, { method: 'POST' }).catch(() => {}); };
     signal?.addEventListener('abort', cancel, { once: true });
@@ -64,20 +94,35 @@ export async function runGenerationJob(payload, signal, onProgress = () => {}) {
                 await pause();
             }
         }
+        // Show the persistent progress/cancel row as soon as acceptance succeeds.
+        await recoverGenerationJobs(job);
         if (signal?.aborted) { cancelRequested = true; job = await request(`/api/generation-jobs/${id}/cancel`, { method: 'POST' }); }
-        while (!terminal.has(job.status)) {
+        while (!terminal.has(job.status) && !job.dialogueReady) {
             if (cancelRequested) await request(`/api/generation-jobs/${id}/cancel`, { method: 'POST' }).catch(() => {});
             onProgress(job);
-            if (payload.kind === 'chat') showPreview(job);
-            await pause();
-            try { job = await request(`/api/generation-jobs/${id}`); }
+            if (payload.kind === 'chat') {
+                const element = showPreview(job);
+                if (!previewRecorded && element?.isConnected && !document.hidden) {
+                    previewRecorded = true;
+                    console.info('Generation first preview DOM (milliseconds)', JSON.stringify({ id, observer: Math.round(performance.now() - started) }));
+                    // Two animation frames indicate a render opportunity, not proof of physical paint.
+                    if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+                        if (!document.hidden && element.isConnected && sameOrigin(origin)) console.info('Generation first preview render opportunity (milliseconds)', JSON.stringify({ id, observer: Math.round(performance.now() - started) }));
+                    }));
+                }
+            }
+            await pause(500);
+            try {
+                job = await request(`/api/generation-jobs/${id}`);
+                await recoverGenerationJobs(job);
+            }
             catch (error) {
                 if (!(error instanceof TypeError)) throw error;
                 onProgress({ stage: 'reconnecting' });
             }
         }
         if (job.status === 'cancelled') throw new DOMException('Stopped by user', 'AbortError');
-        if (job.status !== 'completed') {
+        if (job.status !== 'completed' && !job.dialogueReady) {
             notifiedFailures.add(job.id);
             throw new Error(generationFailureMessage(job.error || '생성 결과를 원래 이야기에 저장하지 못했습니다.'));
         }
@@ -104,15 +149,21 @@ export async function runGenerationJob(payload, signal, onProgress = () => {}) {
 }
 
 /** Discover even jobs whose acceptance response was lost when the page closed. */
-async function recoverGenerationJobs() {
+async function recoverGenerationJobs(snapshot) {
     if (recovering || document.hidden) return;
     recovering = true;
     try {
-        const jobs = await request('/api/generation-jobs');
+        // Foreground observation already fetched this receipt; reuse it for progress UI.
+        const jobs = snapshot?.id
+            ? [...knownJobs.filter(job => job.id !== snapshot.id), snapshot]
+            : await request('/api/generation-jobs');
+        knownJobs = jobs;
         const relevant = jobs.filter(job => sameOrigin(job.origin));
         const active = relevant.filter(job => !terminal.has(job.status));
+        const foreground = foregroundGeneration && sameOrigin(foregroundGeneration.origin) ? foregroundGeneration : null;
+        const visible = active.length ? visibleGenerationJobs(relevant) : foreground ? [foreground] : visibleGenerationJobs(relevant);
         let status = document.querySelector('#background_generation_status');
-        if (active.length && !status) {
+        if (visible.length && !status) {
             status = document.createElement('div');
             status.id = 'background_generation_status';
             status.style.cssText = 'order:24;flex-basis:100%;width:100%;font-size:.85em;padding:.4em;';
@@ -121,17 +172,43 @@ async function recoverGenerationJobs() {
             document.querySelector('#send_form')?.prepend(status);
         }
         if (status) {
-            status.textContent = '';
-            for (const job of active) {
-                const row = document.createElement('div');
-                row.textContent = `${job.progress?.phase === 'drawing' ? '이미지' : job.progress?.phase === 'description' ? '이미지 묘사' : '응답'} 생성 중 · ${Math.max(0, Math.floor((Date.now() - Date.parse(job.createdAt)) / 1000))}초 · 다른 화면에서도 계속 처리됩니다 `;
-                const stop = document.createElement('button');
-                stop.className = 'menu_button';
-                stop.textContent = '중지';
-                stop.onclick = () => request(`/api/generation-jobs/${job.id}/cancel`, { method: 'POST' }).then(recoverGenerationJobs);
-                row.append(stop); status.append(row);
+            const displays = visible.map(job => ({ job, text: generationProgressDisplay(job) }));
+            const signature = JSON.stringify(displays.map(({ job, text }) => [job.id, job.status, text, job.toolPending]));
+            // Leave a terminal receipt in place, so polling does not announce the same failure again.
+            if (status.dataset.displaySignature !== signature) {
+                status.textContent = '';
+                for (const { job, text } of displays) {
+                    const row = document.createElement('div');
+                    row.textContent = text;
+                    if (terminal.has(job.status)) { status.append(row); continue; }
+                    if (!job.foregroundOnly) row.append(document.createTextNode(' · 다른 화면에서도 계속 처리됩니다 '));
+                    const stop = document.createElement('button');
+                    stop.className = 'menu_button';
+                    stop.textContent = '중지';
+                    stop.onclick = job.foregroundOnly ? () => stopGeneration() : () => request(`/api/generation-jobs/${job.id}/cancel`, { method: 'POST' }).then(recoverGenerationJobs);
+                    row.append(stop);
+                    if (job.toolPending) {
+                        const detail = document.createElement('pre');
+                        detail.style.cssText = 'white-space:pre-wrap;max-height:16em;overflow:auto;';
+                        detail.textContent = `대상: ${job.toolPending.scope?.world || ''}${job.toolPending.scope?.branch ? ' / ' + job.toolPending.scope.branch.id : ''}${job.toolPending.scope?.characterId ? ' / ' + job.toolPending.scope.characterId : ''}\n${ToolManager.getDisplayName(job.toolPending.name) || job.toolPending.name}\n${job.toolPending.arguments}`;
+                        row.append(detail);
+                        const action = document.createElement('button');
+                        action.className = 'menu_button';
+                        action.textContent = job.toolPending.mode === 'client' ? '요청한 화면 작업 실행' : '위 내용 저장 승인';
+                        action.disabled = Boolean(job.toolPending.claimed);
+                        action.onclick = () => resolvePendingTool(job, true);
+                        row.append(action);
+                        if (job.toolPending.mode !== 'client') {
+                            const reject = document.createElement('button');
+                            reject.className = 'menu_button'; reject.textContent = '저장하지 않음';
+                            reject.onclick = () => resolvePendingTool(job, false); row.append(reject);
+                        } else if (job.toolPending.claimed) row.append(document.createTextNode(' 화면 작업을 이미 시작했습니다. 재실행하지 않습니다.'));
+                    }
+                    status.append(row);
+                }
+                status.dataset.displaySignature = signature;
             }
-            status.hidden = !active.length;
+            status.hidden = !visible.length;
         }
         const orphan = active.find(job => !waiting.has(job.id) && job.progress?.phase === 'dialogue');
         if (orphan) showPreview(await request(`/api/generation-jobs/${orphan.id}`));
@@ -139,8 +216,8 @@ async function recoverGenerationJobs() {
         let refreshed = false;
         for (const job of relevant) {
             if (!sameOrigin(job.origin)) break;
-            if (!terminal.has(job.status) || observed.has(job.id) || waiting.has(job.id)) continue;
-            if (job.status === 'completed') {
+            if ((!terminal.has(job.status) && !job.dialogueReady) || observed.has(job.id) || waiting.has(job.id)) continue;
+            if (job.status === 'completed' || job.dialogueReady) {
                 if (is_send_press) continue;
                 if (!chat.some(message => message.extra?.generation_job === job.id) && !refreshed) {
                     if (!await loadGenerationJobResult(job)) continue;
@@ -157,9 +234,19 @@ async function recoverGenerationJobs() {
     finally { recovering = false; }
 }
 export function initializeGenerationJobs() {
+    eventSource.on(event_types.GENERATION_STARTED, (type, _options, dryRun) => {
+        if (dryRun || type === 'quiet') return;
+        if (!foregroundGeneration || !sameOrigin(foregroundGeneration.origin)) foregroundGeneration = {
+            id: 'foreground', foregroundOnly: true, status: 'running', createdAt: new Date().toISOString(), origin: generationOrigin(),
+        };
+        recoverGenerationJobs();
+    });
+    for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) {
+        eventSource.on(event, () => { foregroundGeneration = null; recoverGenerationJobs(); });
+    }
     eventSource.on(event_types.APP_READY, recoverGenerationJobs);
-    eventSource.on(event_types.CHAT_CHANGED, () => { clearPreview(); recoverGenerationJobs(); });
+    eventSource.on(event_types.CHAT_CHANGED, () => { foregroundGeneration = null; clearPreview(); recoverGenerationJobs(); });
     document.addEventListener('visibilitychange', recoverGenerationJobs);
     window.addEventListener('online', recoverGenerationJobs);
-    setInterval(recoverGenerationJobs, 3000);
+    setInterval(() => { if (!waiting.size) recoverGenerationJobs(); }, 1000);
 }

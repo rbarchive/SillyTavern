@@ -3088,8 +3088,6 @@ async function generatePicture(initiator, args, trigger, message, callback) {
             && !callback && !extension_settings.sd.refine_mode && generationType !== generationMode.BACKGROUND
             && ![generationMode.FACE_MULTIMODAL, generationMode.CHARACTER_MULTIMODAL, generationMode.USER_MULTIMODAL].includes(generationType)) {
             args?._abortController?.addEventListener('abort', stopListener, { once: true });
-            loaderHandle = loader.show({ blocking: false, slug: `${MODULE_NAME}-image-generation`, title: t`Image Generation`,
-                message: '서버에서 이미지 생성 중 · 화면을 바꿔도 계속 처리됩니다', onStop: stopListener });
             return await generateBackgroundImage(generationType, trigger, message, quietPrompt, negativePromptPrefix, characterName, initiator, abortController.signal, generationStatus, imageContinuity, descriptionSettings);
         }
 
@@ -3389,7 +3387,11 @@ async function generateBackgroundImage(generationType, trigger, message, quietPr
         image: { workflow, url: extension_settings.sd.comfy_url, boost, prefix, negative: negativePrompt, prompt, folder,
             minimal: extension_settings.sd.minimal_prompt_processing, generationType, messageTemplate, descriptionSettings, imageContext: imageContinuity?.provenance },
         message: { name, is_user: false, is_system: !getVisibilityByInitiator(initiator), send_date: getMessageTimeStamp(), mes: '', extra: {} },
-    }, signal, job => status.update(job.progress?.phase === 'drawing' ? t`Image generation: drawing image…` : '이미지 묘사 준비 중…'));
+    }, signal, job => {
+        // Once the server accepts the job, its persistent status row owns progress and cancellation.
+        if (job.id) status.hide();
+        else status.update('이미지 생성 서버에 다시 연결하는 중…');
+    });
     return job.result.path;
 }
 

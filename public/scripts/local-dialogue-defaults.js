@@ -17,7 +17,11 @@ export function prepareLocalDialogueParams(params, settings) {
         || !Array.isArray(params.messages) || settings.json_schema) return params;
     const result = structuredClone(params);
     const tail = result.messages.at(-1);
-    const prefix = '<think>\n\n</think>\n\n';
+    // This exact local model's template already opens <think> at the assistant
+    // boundary. Opening it again interferes with its structured generation.
+    // Other Qwen templates retain their existing prefill until verified.
+    const prefix = String(params.model).toLowerCase() === 'qwen3.8-27b-uncensored-mlx'
+        ? '</think>\n\n' : '<think>\n\n</think>\n\n';
     // Preserve an existing assistant continuation (including RP continue/swipe prefixes).
     if (tail?.role === 'assistant' && !tail.tool_calls?.length) {
         if (typeof tail.content !== 'string' || /<think>|<\/think>/.test(tail.content)) return params;

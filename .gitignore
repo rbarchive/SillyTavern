@@ -59,3 +59,6 @@ public/scripts/extensions/third-party
 yarn.lock
 *.code-workspace
 test-results/
+
+# Also ignore a shared dependency symlink, not only dependency directories.
+/node_modules

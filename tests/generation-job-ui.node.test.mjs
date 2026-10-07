@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { failureNotices, generationFailureMessage } from '../public/scripts/generation-job-notifications.js';
+import { generationProgressDisplay, visibleGenerationJobs } from '../public/scripts/generation-progress-display.js';
 // Execute the actual UI entry functions with controlled I/O and delayed hooks.
 const source = fs.readFileSync(new URL('../public/script.js', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 function entry(name, context) {
@@ -61,7 +62,8 @@ test('recovery with two completions defers both after switching during the first
     const end = browserSource.indexOf('\n}', start) + 2;
     let current = 'A', calls = 0;
     const observed = new Set();
-    const c = { recovering: false, document: { hidden: false, querySelector: () => null }, observed, waiting: new Set(), terminal: new Set(['completed']), is_send_press: false,
+    const c = { foregroundGeneration: null, recovering: false, knownJobs: [], document: { hidden: false, querySelector: () => null }, observed, waiting: new Set(), terminal: new Set(['completed']), is_send_press: false,
+        generationProgressDisplay, visibleGenerationJobs,
         request: async () => [{ id: 'first', origin: { file: 'A' }, status: 'completed' }, { id: 'second', origin: { file: 'A' }, status: 'completed' }],
         sameOrigin: origin => origin.file === current, chat: [], clearPreview() {}, loadGenerationJobResult: async () => true,
         applyGenerationJobResult: async () => { calls++; current = 'B'; return false; }, console,
@@ -87,7 +89,8 @@ test('loading a story observes a saved failure without starting a generation or 
     const storage = { getItem: () => persisted, setItem: (key, value) => { persisted = value; } };
     const jobs = [{ id: 'old-overflow', origin: { file: 'A' }, status: 'failed', error: 'request (14104 tokens) exceeds the available context size (8192 tokens)' }];
     function page() {
-        const c = { recovering: false, document: { hidden: false, querySelector: () => null }, observed: new Set(), waiting: new Set(), terminal: new Set(['failed']), is_send_press: false,
+        const c = { foregroundGeneration: null, recovering: false, knownJobs: [], document: { hidden: false, querySelector: () => null }, observed: new Set(), waiting: new Set(), terminal: new Set(['failed']), is_send_press: false,
+            generationProgressDisplay, visibleGenerationJobs,
             request: async (url, options) => { assert.equal(url, '/api/generation-jobs'); assert.equal(options, undefined); requests++; return jobs; },
             sameOrigin: origin => origin.file === 'A', chat: [], clearPreview() {}, console,
             notifiedFailures: failureNotices(storage), generationFailureMessage,
@@ -99,4 +102,29 @@ test('loading a story observes a saved failure without starting a generation or 
     assert.equal(toasts, 1); assert.equal(requests, 3);
     jobs.push({ ...jobs[0], id: 'new-overflow' });
     await page()(); assert.equal(toasts, 2);
+});
+
+test('foreground receipt updates progress without a duplicate job-list request', async () => {
+    const browserSource = fs.readFileSync(new URL('../public/scripts/generation-jobs.js', import.meta.url), 'utf8');
+    const start = browserSource.indexOf('async function recoverGenerationJobs(');
+    const end = browserSource.indexOf('\n}', start) + 2;
+    const receipt = { id: 'owned', origin: { file: 'A' }, status: 'running' };
+    const status = { dataset: {}, append() {} };
+    const c = { knownJobs: [{ ...receipt, status: 'queued' }], foregroundGeneration: null, recovering: false,
+        document: { hidden: false, querySelector: () => status, createElement: () => ({ append() {} }), createTextNode: text => text }, observed: new Set(), waiting: new Set(['owned']),
+        terminal: new Set(['completed']), is_send_press: true, generationProgressDisplay, visibleGenerationJobs,
+        request: async () => assert.fail('receipt is already available'), sameOrigin: () => true, clearPreview() {}, console: { debug: error => assert.fail(String(error)) } };
+    const recover = vm.runInNewContext(browserSource.slice(start, end) + '\nrecoverGenerationJobs', c);
+    await recover(receipt);
+    assert.equal(c.knownJobs.length, 1);
+    assert.equal(c.knownJobs[0].status, 'running');
+});
+
+test('previous tab receipts migrate to persistent storage without retaining errors or prompts', () => {
+    let saved;
+    const storage = { getItem: () => saved, setItem: (_key, value) => { saved = value; } };
+    const previous = { getItem: () => '["already-seen"]' };
+    assert.equal(failureNotices(storage, previous).has('already-seen'), true);
+    assert.equal(failureNotices(storage).has('already-seen'), true);
+    assert.deepEqual(JSON.parse(saved), ['already-seen']);
 });

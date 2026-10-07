@@ -1,3 +1,4 @@
+import { prepareRpBackground } from './rp-background.js';
 import { prepareLocalDialogueParams } from '../../../public/scripts/local-dialogue-defaults.js';
 /* eslint-disable dot-notation */
 import { createHmac } from 'node:crypto';
@@ -2680,6 +2681,8 @@ router.post('/generate', async function (request, response) {
             requestBody.messages = ensureQwenUserQuery(requestBody.messages, getConfigValue('promptPlaceholder', "Let's get started."));
         }
 
+        prepareRpBackground(requestBody, request.body);
+
         if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM && !isTextCompletion) {
             Object.assign(requestBody, prepareLocalDialogueParams(requestBody, request.body));
         }
@@ -2711,7 +2714,7 @@ router.post('/generate', async function (request, response) {
 
         const fetchResponse = await fetch(endpointUrl, config);
 
-        if (request.body.stream) {
+        if (request.body.rp_memory_background ? requestBody.stream : request.body.stream) {
             console.info('Streaming request in progress');
             return await forwardFetchResponse(fetchResponse, response);
         }

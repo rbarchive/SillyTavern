@@ -1,0 +1,26 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { runContextMemoryTurn } from '../src/endpoints/backends/context-memory-runner.js';
+import { nativeSession } from '../src/endpoints/backends/context-memory.js';
+import { latestStateJournalPath } from '../src/endpoints/backends/latest-state-overlay.js';
+for (const fail of [false, true]) test(`latest state ${fail ? 'failure' : 'success'} is independent of skipped consolidation`, async () => {
+ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-latest-'));
+ try {
+  const scope = { world: 'test', story: 'test', branch: 'main' };
+  const rows = [{chat_metadata:{integrity:'test'}},{is_user:false,mes:'인사'},{is_user:true,mes:'같이 가자'}];
+  const events=[]; const phases=[]; let committed=false;
+  const result=await runContextMemoryTurn({latestStateEnabled:true, latestStateStorageRoot:root,request:{model:'qwen',messages:[{role:'system',content:'고정 설정'},{role:'user',content:'같이 가자'}]},session:nativeSession(rows),scope,fixedContext:'고정 설정',rawBudget:4096,countMessages:async()=>100,readSession:()=>nativeSession(rows),signal:new AbortController().signal,update:x=>events.push(x),saveDialogue:async reply=>{committed=true;rows.push({is_user:false,mes:reply.text});},generate:async (_r,_s,progress,params,phase)=>{
+   phases.push(phase);assert.equal(params.max_tokens,8192);assert.equal(params.response_format,undefined);
+   if(phase==='dialogue'){assert.equal(committed,false);return {text:'같이 가겠다고 답했다'};}
+   assert.equal(committed,true);progress({preview:'internal',event:'firstToken',inputProgress:{fraction:0.5},reading:true});
+   if(fail)throw Error('writer failed');return {text:'- 현재: 동행하기로 합의했다',finishReason:'stop'};
+  }});
+  assert.deepEqual(phases,['dialogue','latest-state']);assert.equal(result.sessionSummary.status,'skipped');assert.equal(result.sessionSummary.keepRaw,true);
+  assert.equal(result.sessionSummary.memoryOutcome.latestStateStatus,fail?'failed':'complete');
+  assert.ok(events.every(x=>x.preview===undefined&&x.event!=='firstToken'));
+  if(!fail){const journal=JSON.parse(fs.readFileSync(latestStateJournalPath(scope,root),'utf8'));assert.equal(journal.card.asOfTurn,1);assert.equal(journal.messages,undefined);assert.equal(journal.reply,undefined);assert.ok(journal.actorPrefixRevision);}
+ } finally {fs.rmSync(root,{recursive:true,force:true});}
+});

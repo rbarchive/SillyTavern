@@ -18,10 +18,10 @@ test('local Qwen defaults skip reasoning without losing any RP source or continu
     const settings = { custom_url: 'http://127.0.0.1:9998/v1' };
     const result = prepareLocalDialogueParams(input, settings);
     assert.deepEqual(result.messages.slice(0, -1), input.messages);
-    assert.equal(result.messages.at(-1).content, '<think>\n\n</think>\n\n');
+    assert.equal(result.messages.at(-1).content, '</think>\n\n');
     assert.equal(input.messages.length, 2); assert.equal(result.max_tokens, 8192);
     const continuation = { ...input, messages: [...input.messages, { role: 'assistant', content: '그녀는' }] };
-    assert.equal(prepareLocalDialogueParams(continuation, settings).messages.at(-1).content, '<think>\n\n</think>\n\n그녀는');
+    assert.equal(prepareLocalDialogueParams(continuation, settings).messages.at(-1).content, '</think>\n\n그녀는');
     assert.deepEqual(prepareLocalDialogueParams(result, settings), result);
     for (const excluded of [{ lmstudio_skip_reasoning: false }, { json_schema: {} }]) {
         assert.equal(prepareLocalDialogueParams(input, { ...settings, ...excluded }), input);
@@ -39,9 +39,22 @@ test('tool-enabled Qwen dialogue skips reasoning and preserves tool definitions 
         const before = structuredClone(input);
         const result = prepareLocalDialogueParams(input, settings);
         assert.deepEqual(result.messages.slice(0, -1), before.messages);
-        assert.deepEqual(result.messages.at(-1), { role: 'assistant', content: '<think>\n\n</think>\n\n' });
+        assert.deepEqual(result.messages.at(-1), { role: 'assistant', content: '</think>\n\n' });
         assert.deepEqual(result.tools, tools);
         assert.equal(result.tool_choice, 'auto');
         assert.deepEqual(input, before);
     }
+});
+
+test('verified 27B prefill preserves the inline schema and other Qwen templates keep their legacy prefix', () => {
+    const input = { model: 'qwen3.8-27b-uncensored-mlx', messages: [{ role: 'user', content: '새 질문' }], response_format: { type: 'json_schema', json_schema: { schema: { type: 'object' } } } };
+    const settings = { custom_url: 'http://127.0.0.1:9998/v1', rp_inline_summary: true };
+    const result = prepareLocalDialogueParams(input, settings);
+    assert.equal(result.messages.at(-1).content, '</think>\n\n');
+    assert.deepEqual(result.response_format, input.response_format);
+    assert.deepEqual(prepareLocalDialogueParams(result, settings), result);
+    const other = prepareLocalDialogueParams({ ...input, model: 'qwen3-other-template' }, settings);
+    assert.equal(other.messages.at(-1).content, '<think>\n\n</think>\n\n');
+    assert.equal(prepareLocalDialogueParams(input, { ...settings, lmstudio_skip_reasoning: false }), input);
+    assert.equal(prepareLocalDialogueParams(input, { ...settings, json_schema: {} }), input);
 });

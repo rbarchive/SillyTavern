@@ -96,6 +96,8 @@ import {
     applyStylePins,
 } from './scripts/power-user.js';
 
+import { correctKoreanDialogueDisplay } from './scripts/korean-dialogue-display.js';
+
 import {
     setOpenAIMessageExamples,
     setOpenAIMessages,
@@ -1798,7 +1800,7 @@ export async function sendTextareaMessage() {
  *   output (affects regex placement and some display rules).
  * @returns {string} Sanitized HTML string ready to assign to `innerHTML`.
  */
-export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
+export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false, isStreaming = false) {
     if (!mes) {
         return '';
     }
@@ -1812,6 +1814,7 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         }
     }
 
+    mes = correctKoreanDialogueDisplay(mes, { isSystem, isUser, isReasoning, streaming: isStreaming });
     mesForShowdownParse = mes;
 
     // Force isSystem = false on comment messages so they get formatted properly
@@ -3710,6 +3713,7 @@ class StreamingProcessor {
                 messageId,
                 {},
                 false,
+                !isFinal,
             );
             if (this.messageTextDom instanceof HTMLElement) {
                 if (power_user.stream_fade_in) {
@@ -5382,7 +5386,17 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             && !jsonSchema && (oai_settings.n ?? 1) <= 1) {
             await saveChatConditional();
             const request = await sendOpenAIRequest(type, generate_data.prompt, null, { prepareRequest: true });
-            if (!request.request.tools?.length) {
+            if (chat_metadata.rp_context_memory === true && ['normal', undefined].includes(type)) {
+                request.request.rp_context_memory = true;
+                request.request.rp_inline_summary = false;
+                request.request.max_tokens = 8192;
+                request.request.rp_recent_raw_budget = chat_metadata.rp_recent_raw_budget ?? request.request.rp_recent_raw_budget ?? 6144;
+            }
+            if (chat_metadata.rp_inline_summary === true && chat_metadata.rp_context_memory !== true && ['normal', undefined].includes(type)) {
+                request.request.rp_inline_summary = true;
+                request.request.max_tokens = 8192;
+            }
+            if (!request.request.tools?.length || (request.request.rp_world_background === true && ['normal', undefined].includes(type))) {
                 const origin = generationOrigin();
                 const durableJob = await runGenerationJob({ kind: 'chat', origin,
                     operation: type === 'continue' ? 'continue' : type === 'swipe' ? 'swipe' : 'append',
