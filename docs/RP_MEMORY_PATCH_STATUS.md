@@ -74,3 +74,8 @@ User authorized commit/push on2026-10-08. Paired milestone label: `milestone/rp-
 - 운영8000/공유8001 미설치, 서비스 재시작·commit/push 없음. 실제 운영 기존스토리 복구·웹UI전체는 아직 검증하지 않았다. 모델 의미 누락/사건ID 재사용/사실성 정확도를 보장하는 패치는 아니다. 실모델 시험은 합성자료만 사용하며 결과는 integration/verification/turn-mismatch-20261008에 보존한다.
 
 - 실모델 보완 결과: 같은 가상9~13턴 fixture를 native27B/non-thinking으로3회 실행. t/through_turn 출력0, 서버 완료 경계13 및 병합3/3통과(28.614/17.021/17.053s). 시간 비교/기억 의미 품질 판정은 아님. SERVER_OWNED_RESULT.md에 증거·제약 기록.
+
+### 2026-10-08 대화/후처리 온도 분리
+- 사용자 승인: 대화 온도는 ST 설정값, 최신 상태·장기 기억 후처리는0. native Actor의 temperature0 강제를 제거하고 prepared request 선택 후 writer phase(latest-state/episodic)에만0을적용한다. HTTP writer에도동일정책. 구context runner의episodic phase를명시하여최신상태OFF에서도후처리0유지.
+- 다른샘플링설정과nonthinking/8192/추가호출수는변경하지않는다. ST온도가0이면재생성에서동일출력이나올가능성은유지된다. 새입력반복문제의해결완료주장아님.
+- actual runCustomGeneration 함수의native/HTTP adapter에서대화0.7/0/ordinary0.9전달, writer0강제, prepared선택후강제,한번호출·원래요청무변경검증. 전체357/357 및최종구runner전경불변재확인focused18/18통과. 운영대화·기억본문미열람.

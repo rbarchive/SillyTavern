@@ -34,6 +34,8 @@ export async function runCustomGeneration(input, user, signal, onProgress = () =
     mergeObjectWithYaml(params, body.custom_include_body);
     excludeKeysByYaml(params, body.custom_exclude_body);
     if (preparedParams) params = structuredClone(preparedParams);
+    // Actor sampling comes from the frozen ST request; record writers remain deterministic.
+    if (['latest-state', 'episodic'].includes(workPhase)) params.temperature = 0;
     if (allowTools) {
         // YAML extras cannot replace the validated tools or erase a tool result.
         params.messages = body.messages;
@@ -96,7 +98,7 @@ export async function runCustomGeneration(input, user, signal, onProgress = () =
     try {
         const requestedAt = Date.now();
         onProgress({ event: 'modelRequest', streamMetrics: { requestedAt } });
-        if (nativeOptions) data = await generateLocalWithProgress({ ...params, temperature: 0, top_p: 1, presence_penalty: 0, top_k: undefined, stop: undefined }, { ...nativeOptions, signal: controller.signal, onProgress, repeatPenalty: workPhase === 'dialogue' ? 1 : 1.1 });
+        if (nativeOptions) data = await generateLocalWithProgress({ ...params, top_p: 1, presence_penalty: 0, top_k: undefined, stop: undefined }, { ...nativeOptions, signal: controller.signal, onProgress, repeatPenalty: workPhase === 'dialogue' ? 1 : 1.1 });
         else {
         const response = await fetch(urlJoin(body.custom_url, '/chat/completions'), { method: 'POST', headers, body: JSON.stringify(params), signal: controller.signal });
         if (!response.ok) throw new Error(`Chat model HTTP ${response.status}: ${(await response.text()).slice(0, 2000)}`);

@@ -53,7 +53,7 @@ export async function runContextMemoryTurn(options) {
             if (progress.streamMetrics) metrics.provider = { ...metrics.provider, ...progress.streamMetrics };
             if (progress.modelStats) metrics.modelStats = progress.modelStats;
             report();
-        }, prepared.request);
+        }, prepared.request, 'episodic');
         if (metrics.modelStats?.finishReason === 'length') throw new Error('Memory output truncated');
         controller.signal.throwIfAborted();
         const currentCatalog = sourcesFor(readSession().messages, prepared.throughTurn);
