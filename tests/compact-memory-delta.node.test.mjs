@@ -15,7 +15,7 @@ test('compact tuples restore exact source IDs without changing canonical storage
     assert.deepEqual(input.new_completed_prefix.map(({ source, ...row }) => ({ id: prepared.sourceTable[source], ...row })), messages);
     assert.equal(prepared.request.response_format, undefined);
     assert.equal(prepared.request.max_tokens, 8192);
-    const delta = { v: 2, t: 1, s: [['arrival', '미도착; 도착 후 동행 점검 약속은 유효하다.', [0, 1]]], e: [['promise', '도착 후 함께 점검하기로 약속했다. 아직 이행되지 않았다.', [0, 1]]] };
+    const delta = { v: 4, s: [['arrival', '미도착; 도착 후 동행 점검 약속은 유효하다.', [0, 1]]], e: [['promise', '도착 후 함께 점검하기로 약속했다. 아직 이행되지 않았다.', [0, 1]]] };
     const next = mergeMemoryDelta(JSON.stringify(delta).slice(1), prepared, memory, sources);
     assert.equal(next.version, 4); assert.equal(next.overview, ''); assert.equal(next.through_turn, 1);
     assert.deepEqual(next.events[0].sources, ['t1u', 't1a']); assert.deepEqual(next.scope, scope);
@@ -36,13 +36,13 @@ test('compact updates preserve untouched episodes, resolve open state explicitly
     assert.equal(input.previous_memory.e[0][1], memory.events[0].text);
     assert.deepEqual(input.previous_memory.e[0][2].map(i => prepared.sourceTable[i]), memory.events[0].sources);
     const catalog = { ...sources, ...Object.fromEntries(nextRows.map(x => [x.id, { turn: x.turn, role: x.role, text: x.content }])) };
-    const delta = { v: 2, t: 2, s: [['done', '도착 후 함께 점검 완료.', [0, 1]]], x: [['s', 'waiting']], o: '' };
+    const delta = { v: 4, s: [['done', '도착 후 함께 점검 완료.', [0, 1]]], x: [['s', 'waiting']], o: '' };
     const next = mergeMemoryDelta(JSON.stringify(delta), prepared, memory, catalog);
     assert.deepEqual(next.events, memory.events); assert.equal(next.overview, '');
     assert.deepEqual(next.current_state.map(x => x.id), ['done']); assert.deepEqual(memory.current_state.map(x => x.id), ['waiting']);
-    assert.throws(() => mergeMemoryDelta(JSON.stringify({ v: 2, t: 2, x: [[['s'], 'waiting']], o: '' }), prepared, memory, catalog), /removal/);
+    assert.throws(() => mergeMemoryDelta(JSON.stringify({ v: 4, x: [[['s'], 'waiting']], o: '' }), prepared, memory, catalog), /removal/);
     // Actual writer failure: flat removal IDs must never be repaired or partially applied.
-    assert.throws(() => mergeMemoryDelta(JSON.stringify({ v: 2, t: 2, s: [['waiting', '새 상태', [0]]], x: ['waiting'], o: '' }), prepared, memory, catalog), /removal/);
+    assert.throws(() => mergeMemoryDelta(JSON.stringify({ v: 4, s: [['waiting', '새 상태', [0]]], x: ['waiting'], o: '' }), prepared, memory, catalog), /removal/);
     assert.deepEqual(memory.current_state.map(x => x.id), ['waiting']);
     assert.throws(() => mergeMemoryDelta(JSON.stringify({ ...delta, s: [['waiting', '새 상태', [0]]] }), prepared, memory, catalog), /duplicate/);
     delete delta.o;
@@ -51,21 +51,21 @@ test('compact updates preserve untouched episodes, resolve open state explicitly
 test('compact decoder rejects ambiguity without partial acceptance or legacy fallback', () => {
     const memory = emptyCategorizedMemory(scope), before = structuredClone(memory), prepared = prepare(memory);
     const failures = [
-        { v: 2, t: 1, e: [['e', '내용', [2]]] }, { v: 2, t: 1, e: [['e', '내용', [0.5]]] },
-        { v: 2, t: 1, e: [['e', '내용', ['t1u']]] },
-        { v: 2, t: 1, e: [['e', '내용', [0, 0]]] }, { v: 2, t: 1, e: [['e', '내용', [-1]]] },
-        { v: 2, t: 1, e: [['e', '내용', [0], 'extra']] }, { v: 2, t: 1, e: null },
-        { v: 2, t: 1, e: [['e', '내용', [0]], ['e', '다른 내용', [1]]] },
-        { v: 2, t: 1, x: [['e', 'missing']] }, { v: 2, t: 1, x: [['unknown', 'e']] },
-        { v: 2, t: 2 }, { v: 2, t: 1, unknown: [] }, { v: 1, t: 1 },
-        { v: 2, t: 1, k: [['k', '추정', [0], '인물', 'fact']] },
+        { v: 4, e: [['e', '내용', [2]]] }, { v: 4, e: [['e', '내용', [0.5]]] },
+        { v: 4, e: [['e', '내용', ['t1u']]] },
+        { v: 4, e: [['e', '내용', [0, 0]]] }, { v: 4, e: [['e', '내용', [-1]]] },
+        { v: 4, e: [['e', '내용', [0], 'extra']] }, { v: 4, e: null },
+        { v: 4, e: [['e', '내용', [0]], ['e', '다른 내용', [1]]] },
+        { v: 4, x: [['e', 'missing']] }, { v: 4, x: [['unknown', 'e']] },
+        { v: 4, t: 2 }, { v: 4, unknown: [] }, { v: 1 },
+        { v: 4, k: [['k', '추정', [0], '인물', 'fact']] },
         { version: 1, through_turn: 1, overview: '', current_state: { upsert: [], remove: [] }, events: { upsert: [], remove: [] }, knowledge: { upsert: [], remove: [] } },
     ];
     for (const delta of failures) assert.throws(() => mergeMemoryDelta(JSON.stringify(delta), prepared, memory, sources));
-    assert.throws(() => mergeMemoryDelta('{"v":2,"v":2,"t":1}', prepared, memory, sources), /Duplicate/);
+    assert.throws(() => mergeMemoryDelta('{"v":4,"v":4}', prepared, memory, sources), /Duplicate/);
     assert.deepEqual(memory, before);
     const changed = structuredClone(memory); changed.overview = '동시 변경';
-    assert.throws(() => mergeMemoryDelta('{"v":2,"t":1}', prepared, changed, sources), /Stale/);
+    assert.throws(() => mergeMemoryDelta('{"v":4}', prepared, changed, sources), /Stale/);
 });
 test('writer uses only logical source numbers while retaining mixed-segment text and provenance', () => {
     const rows = [{ chat_metadata: {} }, { is_user: true, mes: '먼저 기록관에 둬.', extra: { rp_memory: { role: 'director', intent: 'scene' } } },
@@ -84,7 +84,7 @@ test('writer uses only logical source numbers while retaining mixed-segment text
 test('compact diagnostics identify the failed source contract without exposing memory text', () => {
     const memory = emptyCategorizedMemory(scope), prepared = prepare(memory);
     for (const [refs, reason] of [[[0, 0], 'sources-duplicate'], [['t1u'], 'source-not-integer'], [[2], 'source-out-of-range'], [[], 'sources-empty']]) {
-        assert.throws(() => mergeMemoryDelta(JSON.stringify({ v: 2, t: 1, e: [['e', 'private-memory-text', refs]] }), prepared, memory, sources), error => {
+        assert.throws(() => mergeMemoryDelta(JSON.stringify({ v: 4, e: [['e', 'private-memory-text', refs]] }), prepared, memory, sources), error => {
             assert.match(error.message, new RegExp(reason));
             assert.match(error.message, /e\[0\]/);
             assert.doesNotMatch(error.message, /private-memory-text/);
@@ -103,7 +103,7 @@ for (const valid of [true, false]) test(`compact runner ${valid ? 'valid checkpo
             if (!prepared) return { text: '반응' + '가'.repeat(800) };
             const input = JSON.parse(prepared.messages.find(x => x.role === 'user').content);
             assert.equal(input.new_completed_prefix[0].source, 0);
-            return { text: JSON.stringify({ v: 2, t: input.through_turn, e: [['e1', '사건', valid ? [0, 1] : ['t1u']]] }) };
+            return { text: JSON.stringify({ v: 4, e: [['e1', '사건', valid ? [0, 1] : ['t1u']]] }) };
         },
     });
     assert.equal(calls, 2); assert.equal(rows.length, 9);

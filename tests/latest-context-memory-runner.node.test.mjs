@@ -35,12 +35,12 @@ test('real background runner forwards only content-free phase stats and coded fa
   const result=await runContextMemoryTurn({latestStateEnabled:true,latestStateStorageRoot:root,request:{model:'qwen',messages:[{role:'user',content:rows.at(-1).mes}]},session:nativeSession(rows),scope,fixedContext:'세계',rawBudget:4096,consolidationTokenBudget:2000,memoryWireFormat:'compact-v2',countMessages:async xs=>xs.reduce((n,x)=>n+x.content.length,0),readSession:()=>nativeSession(rows),update:x=>{events.push(x);recordPhaseDiagnostics(job,x);if(x.workPhase)job.progress.workPhase=x.workPhase;},saveDialogue:async r=>rows.push({is_user:false,mes:r.text}),generate:async (_r,_s,progress,_params,phase)=>{
    if(phase==='dialogue')return{text:'답'.repeat(800)};
    progress({event:'firstContent',receivedAt:Date.now(),preview:'PRIVATE_WRITER_OUTPUT',modelStats:{inputTokens:42,outputTokens:12,finishReason:'stop'}});
-   return{text:phase==='latest-state'?'- 현재 상태: 이동 준비중':'{"v":2,"t":999}',finishReason:'stop'};
+   return{text:phase==='latest-state'?'- 현재 상태: 이동 준비중':'{"v":4,"t":999}',finishReason:'stop'};
   }});
   finishPhaseDiagnostics(job);
-  assert.equal(result.sessionSummary.errorCode,'COMPACT_TURN_MISMATCH');
-  assert.equal(result.sessionSummary.turnDiagnostic.returnedTurn,999);
-  assert.ok(Number.isSafeInteger(result.sessionSummary.turnDiagnostic.expectedTurn));
+  assert.equal(result.sessionSummary.errorCode,'COMPACT_UNKNOWN_FIELDS');
+  assert.equal(result.sessionSummary.turnDiagnostic,undefined);
+  assert.equal(result.sessionSummary.keepRaw,true);
   for(const phase of ['latest-state','episodic']){assert.equal(job.phaseDiagnostics[phase].modelStats.inputTokens,42);assert.ok(Number.isFinite(job.phaseDiagnostics[phase].firstContentMs));}
   assert.ok(!JSON.stringify(events).includes('PRIVATE_WRITER_OUTPUT'));
   assert.ok(!JSON.stringify(diagnosticJob(job)).includes('PRIVATE_WRITER_OUTPUT'));

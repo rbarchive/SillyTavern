@@ -121,8 +121,9 @@ export function buildDeltaRequest(base, { fixedContext, memory, messages, wireFo
     ];
     const sourceTable = [...new Set([...sourceIds, ...categories.flatMap(cat => memory[cat].flatMap(x => x.sources))])];
     if (['compact-v2', 'state-snapshot-v3'].includes(wireFormat)) {
-        request.messages[1].content = wireFormat === 'state-snapshot-v3' ? stateSnapshotWriterInstruction() : compactWriterInstruction();
+        request.messages[1].content = wireFormat === 'state-snapshot-v3' ? stateSnapshotWriterInstruction() : compactWriterInstruction({ serverOwnedThroughTurn: true });
         const input = encodeCompactInput(memory, messages, sourceTable);
+        if (wireFormat === 'compact-v2') input.requested_output = { v: 4 }; // Completion boundary stays request-bound on the server.
         if (wireFormat === 'state-snapshot-v3') {
             // Use the same state name on both sides of the opt-in snapshot contract.
             input.previous_memory.current_state_snapshot = input.previous_memory.s || [];
@@ -131,7 +132,7 @@ export function buildDeltaRequest(base, { fixedContext, memory, messages, wireFo
         }
         request.messages[2].content = JSON.stringify(input);
     }
-    return { request, throughTurn, previousRevision: revision(memory), sourceIds, responsePrefix: '{', wireFormat, ...(['compact-v2', 'state-snapshot-v3'].includes(wireFormat) ? { sourceTable } : {}) };
+    return { request, throughTurn, previousRevision: revision(memory), sourceIds, responsePrefix: '{', wireFormat, ...(wireFormat === 'compact-v2' ? { serverOwnedThroughTurn: true } : {}), ...(['compact-v2', 'state-snapshot-v3'].includes(wireFormat) ? { sourceTable } : {}) };
 }
 
 export function mergeMemoryDelta(content, prepared, memory, sources) {

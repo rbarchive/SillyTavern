@@ -30,9 +30,9 @@ test('invalid snapshot, legacy state operations and duplicate IDs are never repa
 test('valid snapshot plus invalid event or knowledge cannot partially apply state changes',()=>{
  const {memory,prepared}=fixture(),before=structuredClone(memory),valid={v:3,t:2,current_state_snapshot:[['s1','진료소 안.',[0,1]]]};for(const delta of [{e:[['e2','bad',[999]]]},{k:[['k2','bad',[0],'서윤','fact']]},{e:[['e1','new',[0]]],x:[['e','e1']]}]){assert.throws(()=>mergeMemoryDelta(JSON.stringify({...valid,...delta}),prepared,memory,sources));assert.deepEqual(memory,before);}
 });
-test('opt-in builder preserves all previous active states and leaves compact-v2/default contracts unchanged',()=>{
+test('opt-in builder preserves all previous active states and keeps server-owned compact and legacy-default contracts separate',()=>{
  const {memory,prepared,row}=fixture();const input=JSON.parse(prepared.request.messages[2].content);assert.deepEqual(input.previous_memory.current_state_snapshot,memory.current_state.map(row));assert.equal(Object.hasOwn(input.previous_memory,"s"),false);assert.deepEqual(input.requested_output,{v:3,t:prepared.throughTurn});assert.equal(prepared.request.response_format,undefined);assert.equal(prepared.request.max_tokens,8192);
- const options={fixedContext:'세계',memory,messages};const legacy=buildDeltaRequest({model:'qwen'},options),compact=buildDeltaRequest({model:'qwen'},{...options,wireFormat:'compact-v2'});assert.equal(legacy.wireFormat,'legacy-v1');assert.equal(compact.wireFormat,'compact-v2');assert.match(compact.request.messages[1].content,/v:2/);assert.throws(()=>mergeMemoryDelta('{"v":3,"t":2,"current_state_snapshot":[]}',compact,memory,sources));
+ const options={fixedContext:'세계',memory,messages};const legacy=buildDeltaRequest({model:'qwen'},options),compact=buildDeltaRequest({model:'qwen'},{...options,wireFormat:'compact-v2'});assert.equal(legacy.wireFormat,'legacy-v1');assert.equal(compact.wireFormat,'compact-v2');assert.match(compact.request.messages[1].content,/v:4/);assert.throws(()=>mergeMemoryDelta('{"v":3,"t":2,"current_state_snapshot":[]}',compact,memory,sources));
 });
 
 test('snapshot input preserves prior boundary and sources while naming only the requested output target',()=>{
@@ -40,8 +40,8 @@ test('snapshot input preserves prior boundary and sources while naming only the 
  const compact=buildDeltaRequest({model:'qwen'},{...args,wireFormat:'compact-v2'});
  const prior=JSON.parse(compact.request.messages[2].content),aligned=JSON.parse(prepared.request.messages[2].content);
  assert.notEqual(aligned.previous_memory.t,aligned.requested_output.t);assert.equal(aligned.requested_output.t,aligned.through_turn);
- assert.equal(Object.hasOwn(prior,'requested_output'),false);assert.equal(Object.hasOwn(prior.previous_memory,'current_state_snapshot'),false);
- aligned.previous_memory.s=aligned.previous_memory.current_state_snapshot;delete aligned.previous_memory.current_state_snapshot;delete aligned.requested_output;
+ assert.deepEqual(prior.requested_output,{v:4});assert.equal(Object.hasOwn(prior.previous_memory,'current_state_snapshot'),false);
+ aligned.previous_memory.s=aligned.previous_memory.current_state_snapshot;delete aligned.previous_memory.current_state_snapshot;delete aligned.requested_output;delete prior.requested_output;
  assert.deepEqual(aligned,prior);assert.deepEqual(prepared.sourceTable,compact.sourceTable);assert.deepEqual(memory,before);
 });
 test('event rows have three fields; an extra basis or numeric field rejects the entire snapshot',()=>{

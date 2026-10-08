@@ -63,3 +63,14 @@ User authorized commit/push on2026-10-08. Paired milestone label: `milestone/rp-
 - GET /api/generation-jobs/diagnostics/failures/numbering: 최신종료turnmismatch의 당시summaryAnchor와현재archiveprefix hash일치를확인하고그당시길이까지만정규화하여 숫자좌표만복원. 이전context checkpoint는 실패시작전에완료되고scope/anchor가일치한기록만채택. 원문·기억본문은서버내기존함수에서처리되며API/분석결과로출력/저장하지않음. 이경로는원래nativearchive를서버내부에서읽으므로실패파일전용GET과구분하고명시적시스템메타데이터접근허용범위에서만사용한다.
 - basis=UNCHANGED_ARCHIVE_RECONSTRUCTION / exactPayloadObserved=false로정확한과거모델입력capture가아님을표시. 당시내용수정/유효checkpoint부재/target불일치면고정reason으로거부. generation/복구/재시도/원문변경없음. 반환t가이전경계/선택turn/sourceindex에일치하는지,9와13각native행좌표를대조가능. 새runner계측은실제payload기록이며복원자료와혼동하지않음.
 - 합성15턴에과거image/empty/연속user/assistant조각을삽입하여논리번호동일성,원문행번호차이,이전9/목표13구분,실제payload변조control,안전archive재조회/미허용필드제거,이력추가허용·과거편집복원거부검증. 전체ST343/343. ST_HISTORY_NUMBERING_TESTS.log. 실제운영9의기원은운영숫자복원조회전미확정.
+
+### 2026-10-08 서버 관리 완료 경계 (source only, 미배포)
+
+- accepted: 후처리 모델이 완료 턴 번호를 작성하지 않는다. 서버가 선택한 원문 구간의 끝을 해당 요청 결과에 연결한다. 기존 스토리/기억을 초기화하거나 실패한 모델 결과의 t를 덮어써 재사용하지 않는다.
+- 기존 `compact-v2` 설정은 유지하되 새 요청은 `serverOwnedThroughTurn:true`와 응답 계약 `{v:4,s/e/k/x/o}`를 사용한다. `t`/`through_turn` 출력은 허용하지 않는다. 입력의 turn/source는 시간 순서·출처 의미로 남으며 requested_output에는 v만 지정한다. 실제 저장 categorized memory version4 및 through_turn/출처 형식은 변경하지 않는다. opt-in state-snapshot-v3와 legacy-v1은 별개로 유지한다.
+- 서버 prepared의 previousRevision/throughTurn/sourceTable에 바인딩하여 전체 변경분 검증 후 체크포인트를 전진시킨다. 모델이 만든 범위로 요청 범위를 바꾸지 않는다. flag 없는 과거 compact v2 decoder는 이전 t 검증을 유지하며 새 요청에서 과거 v2 실패 결과는 거부한다.
+- 기존 backlog는 마지막 성공 through_turn 이후부터 planner가 선택하며 cap별로 순차 처리한다. 실패 시 summary를 교체하지 않고 raw를 보존하므로 다음 정상 턴에서 같은 미처리 구간을 다시 시도한다. 자동 일괄 재시도 API/DB migration은 추가하지 않는다.
+- 검증: 전체346/346 통과. 새 합성기존스토리(prev8/backlog20)에서 잘못된출처 실패→9~11 재시도 성공→12~14 추가정리, 최신상태 ON/OFF 각각 확인. legacy v2 반환 mismatch 검증·새 출력 t 거부·동일/역행/비정수 경계·stale checkpoint·부분병합거부 확인. 독립 read-only 리뷰에서 blocker 없음, 실제 provider의 length progress 전달 및 journal 원문 anchor/경합 guard 유지 확인.
+- 운영8000/공유8001 미설치, 서비스 재시작·commit/push 없음. 실제 운영 기존스토리 복구·웹UI전체는 아직 검증하지 않았다. 모델 의미 누락/사건ID 재사용/사실성 정확도를 보장하는 패치는 아니다. 실모델 시험은 합성자료만 사용하며 결과는 integration/verification/turn-mismatch-20261008에 보존한다.
+
+- 실모델 보완 결과: 같은 가상9~13턴 fixture를 native27B/non-thinking으로3회 실행. t/through_turn 출력0, 서버 완료 경계13 및 병합3/3통과(28.614/17.021/17.053s). 시간 비교/기억 의미 품질 판정은 아님. SERVER_OWNED_RESULT.md에 증거·제약 기록.
