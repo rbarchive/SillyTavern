@@ -1,3 +1,4 @@
+import { diagnosticErrorCode } from '../../generation-job-diagnostics.js';
 import { runLatestContextMemoryTurn } from './latest-context-memory-runner.js';
 import { assembleContextMessages, planConsolidation, buildDeltaRequest, mergeMemoryDelta, sourcesFor, revision, nativePrefixBoundary } from './context-memory.js';
 import { buildFreeDialogueRequest } from './separate-session-summary.js';
@@ -60,7 +61,7 @@ export async function runContextMemoryTurn(options) {
         metrics.status = 'complete'; metrics.totalMs = Date.now() - metrics.startedAt; report();
         return { ...reply, sessionSummary: { mode: 'context-v1', status: 'complete', summary: memory, sourceRevision, previousThrough: assembled.memory.through_turn, targetAnchor: stored.anchors.slice(0, nativePrefixBoundary(stored, prepared.throughTurn)) } };
     } catch (error) {
-        metrics.status = 'failed'; metrics.totalMs = Date.now() - metrics.startedAt; metrics.error = error.name === 'AbortError' ? 'Memory cancelled' : error.message; report();
-        return { ...reply, sessionSummary: { mode: 'context-v1', status: 'failed', error: metrics.error, keepRaw: true } };
+        metrics.status = 'failed'; metrics.totalMs = Date.now() - metrics.startedAt; metrics.errorCode = diagnosticErrorCode(error); metrics.error = error.name === 'AbortError' ? 'Memory cancelled' : error.message; report();
+        return { ...reply, sessionSummary: { mode: 'context-v1', status: 'failed', error: metrics.error, errorCode: metrics.errorCode, keepRaw: true } };
     } finally { signal?.removeEventListener('abort', abort); }
 }

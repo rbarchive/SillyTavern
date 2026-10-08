@@ -1,3 +1,4 @@
+import { listFailureDiagnostics, persistFailureSnapshot } from '../generation-failure-diagnostics.js';
 import { worldToolAdapter, runWorldToolTurn, decideWorldTool } from './backends/world-tool-runner.js';
 import { countLocalMessages } from './backends/local-model-progress.js';
 import express from 'express';
@@ -155,6 +156,50 @@ router.post('/', async (req, res) => {
 });
 router.get('/', async (req, res) => {
     try { res.send(await listJobSummaries(req.user)); } catch (error) { res.status(500).send({ error: error.message }); }
+});
+// Safe operational export. No recovery, provider call, raw errors or content fields.
+router.post('/diagnostics/failures/export', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!req.user?.directories?.root) return res.status(401).json({ errorCode: 'AUTH_REQUIRED' });
+    const limit = req.body?.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return res.status(400).json({ errorCode: 'INVALID_LIMIT' });
+    try {
+        const jobs = await listJobSummaries(req.user, { recover: false });
+        let written = 0, skipped = 0, writeFailures = 0;
+        for (const job of jobs.slice(0, limit)) {
+            try { if (persistFailureSnapshot(req.user.directories.root, job.diagnostics)) written++; else skipped++; }
+            catch { writeFailures++; }
+        }
+        return res.json({ schemaVersion: 1, written, skipped, writeFailures });
+    } catch { return res.status(500).json({ errorCode: 'DIAGNOSTICS_UNAVAILABLE' }); }
+});
+router.get('/diagnostics/failures', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!req.user?.directories?.root) return res.status(401).json({ errorCode: 'AUTH_REQUIRED' });
+    const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return res.status(400).json({ errorCode: 'INVALID_LIMIT' });
+    try { return res.json({ schemaVersion: 1, ...await listFailureDiagnostics(req.user.directories.root, limit) }); }
+    catch { return res.status(500).json({ errorCode: 'DIAGNOSTICS_UNAVAILABLE' }); }
+});
+router.get('/diagnostics', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!req.user?.directories?.root) return res.status(401).json({ errorCode: 'AUTH_REQUIRED' });
+    const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return res.status(400).json({ errorCode: 'INVALID_LIMIT' });
+    try {
+        const jobs = await listJobSummaries(req.user, { recover: false });
+        const rawBudget = getConfigValue('rpMemoryRecentRawBudget', 6144);
+        const consolidationBudget = getConfigValue('rpMemoryConsolidationTokenBudget', 512);
+        const wireFormat = getConfigValue('rpMemoryConsolidationWireFormat', 'legacy-v1');
+        return res.json({ schemaVersion: 1, configuration: {
+            contextMemoryEnabled: getConfigValue('enableRpContextMemory', false) === true,
+            latestStateEnabled: getConfigValue('rpMemoryLatestStateEnabled', false) === true,
+            nativeProgressEnabled: getConfigValue('rpMemoryNativeProgressEnabled', false) === true,
+            rawBudget: [4096, 6144, 8192, 12288, 16384].includes(rawBudget) ? rawBudget : null,
+            consolidationBudget: Number.isSafeInteger(consolidationBudget) && consolidationBudget >= 1 && consolidationBudget <= 8192 ? consolidationBudget : null,
+            wireFormat: ['legacy-v1', 'compact-v2'].includes(wireFormat) ? wireFormat : null,
+        }, jobs: jobs.slice(0, limit).map(job => job.diagnostics) });
+    } catch { return res.status(500).json({ errorCode: 'DIAGNOSTICS_UNAVAILABLE' }); }
 });
 router.get('/capabilities', (_req, res) => res.send({ contextMemory: getConfigValue('enableRpContextMemory', false) && getConfigValue('rpMemoryDefaultContextMemory', false), contextModel: getConfigValue('rpMemoryNativeModel', ''), recentRawBudget: getConfigValue('rpMemoryRecentRawBudget', 6144), worldBackground: Boolean(worldToolAdapter()) }));
 router.post('/:id/tool-decision', async (req, res) => {

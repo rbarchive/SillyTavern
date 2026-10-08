@@ -43,10 +43,14 @@ export function encodeCompactInput(memory, messages, sourceTable) {
 
 /** Decode syntax only. No semantic inference, source guessing or partial acceptance. */
 export function decodeCompactDelta(value, prepared, memory) {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || value.v !== 2 || value.t !== prepared.throughTurn
-        || !Object.hasOwn(value, 'v') || !Object.hasOwn(value, 't')
-        || Object.keys(value).some(key => !['v', 't', 's', 'e', 'k', 'x', 'o'].includes(key))
-        || !Array.isArray(prepared.sourceTable) || new Set(prepared.sourceTable).size !== prepared.sourceTable.length) throw new Error('Invalid compact delta');
+    const fail = code => { const error = new Error('Invalid compact delta'); error.code = code; throw error; };
+    if (!value || typeof value !== 'object' || Array.isArray(value)) fail('COMPACT_NOT_OBJECT');
+    if (!Object.hasOwn(value, 'v')) fail('COMPACT_VERSION_MISSING');
+    if (value.v !== 2) fail('COMPACT_VERSION_MISMATCH');
+    if (!Object.hasOwn(value, 't')) fail('COMPACT_TURN_MISSING');
+    if (value.t !== prepared.throughTurn) fail('COMPACT_TURN_MISMATCH');
+    if (Object.keys(value).some(key => !['v', 't', 's', 'e', 'k', 'x', 'o'].includes(key))) fail('COMPACT_UNKNOWN_FIELDS');
+    if (!Array.isArray(prepared.sourceTable) || new Set(prepared.sourceTable).size !== prepared.sourceTable.length) fail('COMPACT_SOURCE_TABLE_INVALID');
     const delta = { version: 1, through_turn: value.t, overview: memory.overview };
     let changed = false;
     for (const [key, category] of Object.entries(names)) {
@@ -63,7 +67,9 @@ export function decodeCompactDelta(value, prepared, memory) {
                 : new Set(row[2]).size !== row[2].length ? 'sources-duplicate'
                 : row[2].some(index => !Number.isSafeInteger(index)) ? 'source-not-integer'
                 : row[2].some(index => index < 0 || index >= prepared.sourceTable.length) ? `source-out-of-range; table-length=${prepared.sourceTable.length}` : null;
-            if (reason) throw new Error(`Invalid compact row or source (${key}[${rowIndex}]: ${reason})`);
+            if (reason) { const error = new Error(`Invalid compact row or source (${key}[${rowIndex}]: ${reason})`); error.code = reason.startsWith('row-length=') ? 'COMPACT_ROW_LENGTH'
+                : reason.startsWith('source-out-of-range') ? 'COMPACT_SOURCE_OUT_OF_RANGE'
+                    : ({ 'row-not-array': 'COMPACT_ROW_INVALID', 'id-or-text-not-string': 'COMPACT_ROW_TYPES', 'sources-not-array': 'COMPACT_SOURCES_NOT_ARRAY', 'sources-empty': 'COMPACT_SOURCES_EMPTY', 'sources-duplicate': 'COMPACT_SOURCES_DUPLICATE', 'source-not-integer': 'COMPACT_SOURCE_NOT_INTEGER' })[reason]; throw error; }
             delta[category].upsert.push({ id: row[0], text: row[1], sources: row[2].map(index => prepared.sourceTable[index]),
                 ...(key === 'k' ? { holder: row[3], basis: row[4] } : {}) });
             changed = true;

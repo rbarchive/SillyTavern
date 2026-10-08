@@ -29,3 +29,24 @@ Canonical detailed status and evidence: paired repository `docs/CURRENT_IMPLEMEN
 ## Development milestone
 
 User authorized commit/push on2026-10-08. Paired milestone label: `milestone/rp-memory-2026-10-08`. This records the validated development checkpoint, with the factual quality/latency limitations above retained. One preceding local commit `551016b3d` (generation recovery polling/failure notices) is also outgoing and is part of the milestone history. Production deployment is not included. The milestone commit/tag was published to origin/release. Git now uses the existing GitHub CLI credential helper for github.com in this checkout only; no token values or global Git settings were changed. The milestone tag points to 78320b02a; a later documentation commit may record the publication.
+
+
+### 2026-10-08 내용 없는 운영 진단 (source only)
+
+- `GET /api/generation-jobs/diagnostics?limit=20` (`1..100`, 기본20). 기존 로그인·사용자별 경계를 유지하며 `Cache-Control: no-store`. 응답 `schemaVersion:1`, 고정형 configuration과 최신 작업의 diagnostics만 제공한다. 이 응답을 저장/분석하는 운영 점검에 사용하고 기존 전체 작업 상세 API를 진단 export로 쓰지 않는다.
+- 포함: 해시 처리한 jobRef, 상태·생성/갱신 시각, 대사 준비 여부, phase, 숫자 시간·토큰·캐시, 종료 사유, 최신 상태/장기 기억의 성공·실패·원문 보존 상태, 고정 오류 코드. 설정은 활성 여부·입력 budget·wireFormat만 허용한다.
+- 제외: origin/세계·스토리·캐릭터 이름과 ID, 파일 경로, 대화/세계관/기억/모델 입력·출력·reasoning, tool receipts, URL, 원래 오류 문자열, 알 수 없는 필드. jobRef는 원래 사용자 지정 작업 ID의 SHA256 앞24자리로, 내용을 직접 출력하지 않는 상관키이며 익명성 보장을 의미하지 않는다.
+- 조회는 provider 요청/재시도/재시작 복구/DB 변경/원문 변경을 수행하지 않는다. 없는 작업 디렉터리도 만들지 않고 캐시 읽기·쓰기·eviction을 하지 않는다. 서버 내부의 기존 작업 JSON 파싱을 재사용하되 API에는 명시 허용 목록만 반환한다. 메타데이터도 접근 권한 대상이다. 이 endpoint가 운영 조회에 대한 상시 승인을 의미하지 않는다.
+- compact 최상위 검증의 object/version 누락·불일치/처리turn 누락·불일치/미허용 필드/sourceTable 오류를 각각 고정 코드로 분리. 행 타입·출처 비정수·중복·범위 오류도 구분. 검증 강도·모델 입력/샘플링/호출 횟수·기억 병합 결과는 변경하지 않는다.
+- `memory.latestStateMs`, `episodicMs`, `totalMs`는 기존 runner 계측. 새 `phaseStats`는 단계 진입→다음 단계 전환/종료의 벽시계 시간이므로 준비·계획·저장 등의 비용도 포함할 수 있다. `firstContentMs`는 해당 phase 시작 기준의 첫 본문 토큰이며 브라우저 DOM 표시 시간이 아니다. 최상위 modelStats는 기존 기록 호환용이고 phaseStats가 있는 새 작업에서는 phase별 값을 우선 사용한다. 미계측 값은 생략하며 0으로 추정하지 않는다.
+- 기존 작업에 저장된 memoryMetrics도 안전하게 조회 가능. 상세 오류 코드와 phaseStats가 없는 과거 기록은 복원하지 않는다. 옛 `Invalid compact delta`는 MEMORY_CONTRACT_INVALID까지만 분류하며 정확한 위반 조건은 신규 작업부터 확인한다. 의미/사실성 오류는 본문 없이 확정할 수 없다.
+- 검증: 합성 fixture HTTP 실제 경로·사용자 분리·인증 누락·상한·고정 오류 응답·내용 sentinel 비노출·orphan 무변경/정상 recovery 유지·없던 디렉터리 무생성, 실제 background runner의 단계 stats/첫본문 이벤트와 오류 코드 전달, compact 실패 code별 분리 및 기존 raw 보존. ST 전체335/335 통과; 문법검사·git diff --check 통과. ESLint 실행 파일이 checkout에 없어 lint는 미실행. 로그: sandboxes/integration/verification/operational-diagnostics-20261008/ST_TESTS.log.
+- main이 구현·시험, 독립 read-only reviewer가 노출/동작/실제 callback 누락을 검토했고 지적 사항 반영. 공유8001/운영8000 설치·재시작·실제 모델 호출·커밋·푸시는 수행하지 않음. 8000의 기존 실패를 해결했다는 판정은 하지 않는다.
+
+
+#### 실패 진단 파일 분리 추가 (미배포)
+- 사용자별 `<data-root>/<user>/diagnostics/generation-failures/<hash-jobRef>.json`에 실패 종료 시 자동 추출한다. 정확한 root는 기존 user.directories.root다. 기존 generation-jobs/대화/기억 파일은 이동·삭제·수정하지 않는다. 정상 성공·사용자 취소는 생성하지 않으며 generation failed/conflict/interrupted 및 응답 완료 후 latest-state/episodic 실패도 포함한다. 자동 삭제/보관기간 제한은 추가하지 않았다.
+- JSON은 schemaVersion/failureKinds/strict diagnostic snapshot뿐이다. 원문·세계관·기억·provider 출력·원래 오류·파일명/원래job ID는 저장하지 않는다. 사용자별 디렉터리0700, 파일0600, atomic write; 같은 작업은 같은 파일로 갱신되어 재조회·재추출 중복을 만들지 않는다. 파일 저장 장애는 고정 FAILURE_DIAGNOSTIC_WRITE_FAILED만 stderr에 남기고 원래 작업 완료/실패 상태를 바꾸지 않는다.
+- `GET /api/generation-jobs/diagnostics/failures?limit=20`은 별도 파일만 읽는다. 기존 작업/대화 저장소를 열지 않는다. 파일을 다시 허용목록으로 검증하고 알 수 없는 필드/오류 문자열은 제외한다. 손상/잘못된 기록·symlink는 unreadableRecords 수로만 보고한다. 조회는 파일 생성/복구하지 않음.
+- `POST /api/generation-jobs/diagnostics/failures/export` body `{ "limit":100 }`은 기존 최신<=100개 작업의 safe snapshot 중 실패만 명시적으로 별도 추출한다. 로그인·CSRF 경계 유지, 응답은 written/skipped/writeFailures 숫자만. 반복실행 가능하며 원래 파일과 작업 상태는 변경하지 않는다. 실행 전 운영 조회·쓰기 권한 확인 필요. 자동 startup backfill 없음.
+- 검증: 실제 합성 작업 실패→자동 파일 생성, 완료된 대화의 기억 실패·state-only 실패, 내용 sentinel 미저장,0600,동일job1파일,디스크 장애가 작업결과에 영향 없음, 원래 작업·대화 제거 후 실패API 조회, 기존 실패 HTTP수동추출2회 원래bytes 불변, 변조/손상파일 재검증. 전체ST338/338+문법/diff 검사 통과. ST_FAILURE_ARCHIVE_TESTS.log. 실제 운영 디스크·모델 실패는 미검증,8000/8001미적용·commit/push0.

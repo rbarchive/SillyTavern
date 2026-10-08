@@ -1,3 +1,4 @@
+import { diagnosticErrorCode } from '../../generation-job-diagnostics.js';
 import { orderRoleMetadata } from './cache-friendly-context.js';
 import { assembleContextMessages, planConsolidation, buildDeltaRequest, mergeMemoryDelta, sourcesFor, revision, nativePrefixBoundary } from './context-memory.js';
 import { buildFreeDialogueRequest } from './separate-session-summary.js';
@@ -32,8 +33,9 @@ export async function runLatestContextMemoryTurn({ request, session, previous, s
     let workPhase = 'latest-state';
     const outcome = episodicStatus => ({ latestStateStatus: metrics.latestState?.status === 'complete' ? 'complete' : 'failed', episodicStatus, keepRaw: episodicStatus !== 'complete' });
     const finish = sessionSummary => ({ ...reply, sessionSummary: { ...sessionSummary, memoryOutcome: outcome(sessionSummary.status) } });
-    const report = () => update({ phase: 'session-summary', memoryMetrics: { ...metrics, latestState: metrics.latestState ? { status: metrics.latestState.status, asOfTurn: metrics.latestState.card?.asOfTurn } : undefined, stateProgress: undefined }, memoryOutcome: metrics.latestState ? outcome(metrics.status) : undefined });
+    const report = () => update({ phase: 'session-summary', memoryMetrics: { ...metrics, latestState: metrics.latestState ? { status: metrics.latestState.status, asOfTurn: metrics.latestState.card?.asOfTurn, errorCode: diagnosticErrorCode(metrics.latestState.error) } : undefined, stateProgress: undefined }, memoryOutcome: metrics.latestState ? outcome(metrics.status) : undefined });
     const showRead = progress => {
+        if (progress.modelStats || progress.event === 'firstContent') update({ phaseModelStats: progress.modelStats, phaseFirstContentAt: progress.event === 'firstContent' ? progress.receivedAt : undefined });
         if (progress.inputProgress || progress.reading !== undefined) update({ workPhase, inputProgress: progress.inputProgress, reading: progress.reading, longReadPossible: progress.longReadPossible });
     };
     const phase = value => { workPhase = value; update({ phase: 'session-summary', workPhase: value, phaseStartedAt: Date.now(), reading: false }); };
@@ -84,7 +86,7 @@ export async function runLatestContextMemoryTurn({ request, session, previous, s
         metrics.status = 'complete'; metrics.totalMs = Date.now() - metrics.startedAt; report();
         return finish({ mode: 'context-v1', status: 'complete', summary: memory, sourceRevision, previousThrough: assembled.memory.through_turn, targetAnchor: stored.anchors.slice(0, nativePrefixBoundary(stored, prepared.throughTurn)) });
     } catch (error) {
-        metrics.status = 'failed'; metrics.totalMs = Date.now() - metrics.startedAt; metrics.error = error.name === 'AbortError' ? 'Memory cancelled' : error.message; report();
-        return finish({ mode: 'context-v1', status: 'failed', error: metrics.error, keepRaw: true });
+        metrics.status = 'failed'; metrics.totalMs = Date.now() - metrics.startedAt; metrics.errorCode = diagnosticErrorCode(error); metrics.error = error.name === 'AbortError' ? 'Memory cancelled' : error.message; report();
+        return finish({ mode: 'context-v1', status: 'failed', error: metrics.error, errorCode: metrics.errorCode, keepRaw: true });
     } finally { signal?.removeEventListener('abort', abort); }
 }

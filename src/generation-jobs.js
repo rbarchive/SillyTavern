@@ -1,3 +1,5 @@
+import { persistFailureDiagnostic } from './generation-failure-diagnostics.js';
+import { diagnosticJob, recordPhaseDiagnostics, finishPhaseDiagnostics } from './generation-job-diagnostics.js';
 /** Durable, user-scoped generation jobs. Providers are never replayed after restart. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,11 +36,11 @@ function component(value, label) {
     }
     return value;
 }
-function scope(user) {
+function scope(user, { create = true } = {}) {
     if (!user?.directories?.root) fail('Authenticated user directories required.', 'invalid_request');
     const root = path.resolve(user.directories.root);
     const directory = path.join(root, 'generation-jobs');
-    fs.mkdirSync(directory, { recursive: true });
+    if (create) fs.mkdirSync(directory, { recursive: true });
     return { root, directory };
 }
 function recordPath(user, id) {
@@ -61,6 +63,8 @@ function save(file, job) {
     delete persisted.preview;
     atomic(file, JSON.stringify(persisted));
     summaryCache.delete(file);
+    try { persistFailureDiagnostic(path.dirname(path.dirname(file)), job); }
+    catch { console.error('FAILURE_DIAGNOSTIC_WRITE_FAILED'); }
 }
 function readChat(file) {
     return fs.readFileSync(file, 'utf8').split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
@@ -108,32 +112,35 @@ export async function listJobs(user) {
 }
 
 /** Poll lightweight receipts without synchronously rereading every frozen prompt/result. */
-export async function listJobSummaries(user) {
-    const { directory } = scope(user);
-    const names = (await fs.promises.readdir(directory)).filter(name => /^[a-zA-Z0-9_-]+\.json$/u.test(name));
+export async function listJobSummaries(user, { recover = true } = {}) {
+    const { directory } = scope(user, { create: recover });
+    let entries;
+    try { entries = await fs.promises.readdir(directory); } catch (error) { if (!recover && error.code === 'ENOENT') return []; throw error; }
+    const names = entries.filter(name => /^[a-zA-Z0-9_-]+\.json$/u.test(name));
     const summaries = [];
     for (const name of names) {
         const file = path.join(directory, name);
         try {
             const stat = await fs.promises.stat(file);
             const stamp = `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
-            let receipt = summaryCache.get(file);
+            let receipt = recover ? summaryCache.get(file) : undefined;
             if (!receipt || receipt.stamp !== stamp) {
                 let job = JSON.parse(await fs.promises.readFile(file, 'utf8'));
                 // Preserve crash recovery; listing never starts a provider request.
-                if (!terminal.has(job.status) && !active.has(file)) job = load(file);
+                if (recover && !terminal.has(job.status) && !active.has(file)) job = load(file);
                 const { id, origin, operation, status, createdAt, updatedAt, progress, timings, modelStats, error, result, dialogueReady, sessionSummary, memoryOutcome, toolPending, toolReceipts } = job;
                 receipt = { stamp, summary: { id, origin, operation, status, createdAt, updatedAt, progress, timings, modelStats, error, dialogueReady, toolPending, toolReceipts: toolReceipts?.map(({ id, name, writeApplied, warning }) => ({ id, name, writeApplied, warning })),
+                    diagnostics: diagnosticJob(job),
                     memoryOutcome: sessionSummary?.memoryOutcome ?? memoryOutcome,
                     sessionSummary: sessionSummary ? { status: sessionSummary.status, error: sessionSummary.error, keepRaw: sessionSummary.keepRaw } : undefined,
                     result: result?.path ? { path: result.path } : undefined } };
-                if (summaryCache.size >= 2000) summaryCache.delete(summaryCache.keys().next().value);
-                summaryCache.set(file, receipt);
+                if (recover && summaryCache.size >= 2000) summaryCache.delete(summaryCache.keys().next().value);
+                if (recover) summaryCache.set(file, receipt);
             }
             summaries.push(copy(receipt.summary));
         } catch (error) {
             if (error.code !== 'ENOENT') throw error;
-            summaryCache.delete(file); // A concurrent acceptance may prune an old receipt.
+            if (recover) summaryCache.delete(file); // A concurrent acceptance may prune an old receipt.
         }
     }
     return summaries.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -224,6 +231,7 @@ export async function acceptJob(user, { id, origin, operation = 'append', messag
                     return;
                 }
                 if (!controller.signal.aborted && !terminal.has(job.status)) {
+                    recordPhaseDiagnostics(job, progress);
                     // Preview stays in memory; never persist partial dialogue or write per token.
                     if (typeof progress?.preview === 'string') previews.set(file, progress.preview.slice(-32000));
                     job.progress = { ...job.progress, phase: String(progress?.phase ?? job.progress?.phase ?? '').slice(0, 80), received: Number(progress?.received) || job.progress?.received || 0 };
@@ -273,6 +281,7 @@ export async function acceptJob(user, { id, origin, operation = 'append', messag
                 }
             } });
             if (controller.signal.aborted) return;
+            finishPhaseDiagnostics(job);
             if (job.dialogueReady) {
                 // The browser can edit/save the committed dialogue while the hidden
                 // tail runs. Store the summary in this job, never rewrite the chat.
@@ -292,6 +301,7 @@ export async function acceptJob(user, { id, origin, operation = 'append', messag
         } catch (error) {
             if (!controller.signal.aborted) {
                 job.status = job.dialogueReady ? 'completed' : job.message ? 'conflict' : 'failed';
+                finishPhaseDiagnostics(job);
                 if (job.dialogueReady) job.sessionSummary = { status: 'failed', error: String(error.message || error) };
                 else job.error = String(error.message || error);
                 save(file, job);
@@ -310,6 +320,7 @@ export async function cancelJob(user, id) {
     if (!job || terminal.has(job.status)) return job;
     active.get(file)?.abort();
     job.status = job.dialogueReady ? 'completed' : 'cancelled';
+    finishPhaseDiagnostics(job);
     if (job.dialogueReady) job.sessionSummary = { status: 'cancelled', ...(job.progress?.workPhase ? { keepRaw: true, memoryOutcome: { ...job.memoryOutcome, episodicStatus: 'cancelled', keepRaw: true } } : {}) };
     save(file, job);
     return job;

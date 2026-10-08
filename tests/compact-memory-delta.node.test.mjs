@@ -115,6 +115,6 @@ for (const valid of [true, false]) test(`compact runner ${valid ? 'valid checkpo
         assert.equal(assembled.messages.at(-1).content.endsWith('다음 질문'), true);
         assert.equal(assembled.messages.filter(x => x.role !== 'system').length, session.messages.filter(x => x.turn > memory.through_turn).length);
     } else {
-        assert.equal(result.sessionSummary.status, 'failed'); assert.equal(result.sessionSummary.keepRaw, true); assert.equal(result.sessionSummary.summary, undefined);
+        assert.equal(result.sessionSummary.status, 'failed'); assert.equal(result.sessionSummary.errorCode, 'COMPACT_SOURCE_NOT_INTEGER'); assert.equal(result.sessionSummary.keepRaw, true); assert.equal(result.sessionSummary.summary, undefined);
     }
 });
