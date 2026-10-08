@@ -56,3 +56,10 @@ User authorized commit/push on2026-10-08. Paired milestone label: `milestone/rp-
 - COMPACT_TURN_MISSING/MISMATCH에 turnDiagnostic을 붙인다: expectedTurn, 반환값의 고정 returnedType, 숫자인 경우 유한 returnedTurn, 숫자로만 된 문자열인 경우 안전한 numericStringTurn. 원래 문자열/배열/객체는 기록하지 않는다. 타입만 다르더라도 기존과 동일하게 실패 처리하고 검증 완화/자동값덮어쓰기 없음.
 - runner→sessionSummary/memoryMetrics→safe API→실패JSON 저장/재검증까지 전달. 과거 결과에 없는 이 값을 소급 복원하지 않으며 새 작업부터 기록한다. 예 expected13/returnedType:string/numericStringTurn13과 expected13/returnedType:number/returnedTurn2를 구분 가능.
 - 합성 숫자·숫자문자열·누락·임의본문·객체·null·소수 cases 및 실제 background runner 전달, 파일archive재조회 검증. ST339/339 통과; 로그 ST_TURN_DIAGNOSTICS_TESTS.log. 이 변경은 관측만 강화하며 당시운영실패원인의확정/수정은아직아님.
+
+
+#### 과거 혼합 이력의 번호 대조 (내용 없음)
+- runner가 정확한 server-built writer payload의 목표·이전경계·논리turn/role/source index와 server-side 원문행 좌표/auxiliary kind를 numberingDiagnostic으로 기록한다. 텍스트·인물·세계/스토리명·source id 문자열은 제외하고 배열최대128/truncated명시. 실제모델요청/검증기준은변경하지않음.
+- GET /api/generation-jobs/diagnostics/failures/numbering: 최신종료turnmismatch의 당시summaryAnchor와현재archiveprefix hash일치를확인하고그당시길이까지만정규화하여 숫자좌표만복원. 이전context checkpoint는 실패시작전에완료되고scope/anchor가일치한기록만채택. 원문·기억본문은서버내기존함수에서처리되며API/분석결과로출력/저장하지않음. 이경로는원래nativearchive를서버내부에서읽으므로실패파일전용GET과구분하고명시적시스템메타데이터접근허용범위에서만사용한다.
+- basis=UNCHANGED_ARCHIVE_RECONSTRUCTION / exactPayloadObserved=false로정확한과거모델입력capture가아님을표시. 당시내용수정/유효checkpoint부재/target불일치면고정reason으로거부. generation/복구/재시도/원문변경없음. 반환t가이전경계/선택turn/sourceindex에일치하는지,9와13각native행좌표를대조가능. 새runner계측은실제payload기록이며복원자료와혼동하지않음.
+- 합성15턴에과거image/empty/연속user/assistant조각을삽입하여논리번호동일성,원문행번호차이,이전9/목표13구분,실제payload변조control,안전archive재조회/미허용필드제거,이력추가허용·과거편집복원거부검증. 전체ST343/343. ST_HISTORY_NUMBERING_TESTS.log. 실제운영9의기원은운영숫자복원조회전미확정.

@@ -33,10 +33,36 @@ export function sanitizeTurnDiagnostic(value) {
     if (value.returnedType === 'string' && Number.isSafeInteger(value.numericStringTurn) && value.numericStringTurn >= 0) result.numericStringTurn = value.numericStringTurn;
     return Object.keys(result).length ? result : undefined;
 }
+/** Bounded numeric coordinates and fixed row kinds; no IDs or text. */
+export function sanitizeNumberingDiagnostic(value) {
+    if (!value || typeof value !== 'object') return undefined;
+    const result = numeric(value, ['previousThroughTurn', 'requestedThroughTurn', 'payloadThroughTurn', 'payloadPreviousThroughTurn', 'completedThroughTurn', 'archiveRowCount', 'openingCount', 'selectedRowCount', 'sourceTableCount', 'auxiliaryCount']);
+    if (typeof value.requestMatchesPayload === 'boolean') result.requestMatchesPayload = value.requestMatchesPayload;
+    if (typeof value.truncated === 'boolean') result.truncated = value.truncated;
+    const row = item => ({ ...numeric(item, ['turn', 'sourceIndex']), role: choice(item?.role, ['user', 'assistant']), nativeRows: Array.isArray(item?.nativeRows) ? item.nativeRows.filter(x => Number.isSafeInteger(x) && x >= 0).slice(0, 128) : undefined });
+    for (const key of ['selectedRows', 'payloadRows', 'sourceTableRows']) if (Array.isArray(value[key])) result[key] = value[key].slice(0, 128).map(row);
+    if (Array.isArray(value.auxiliaryRows)) result.auxiliaryRows = value.auxiliaryRows.slice(0, 128).map(item => ({ ...numeric(item, ['nativeRow']), kind: choice(item?.kind, ['media-artifact', 'system-record', 'empty']) }));
+    return result;
+}
+export function buildNumberingDiagnostic(prepared, selected, memoryValue, session) {
+    // Inspect the exact server-built payload, not a reconstructed expectation.
+    const payload = JSON.parse(prepared.request.messages.find(row => row.role === 'user').content);
+    const table = prepared.sourceTable ?? [];
+    const payloadRows = (payload.new_completed_prefix ?? []).map(row => ({ turn: row.turn, role: row.role, sourceIndex: row.source }));
+    const selectedRows = selected.map(row => ({ turn: row.turn, role: row.role, sourceIndex: table.indexOf(row.id), nativeRows: row.source_rows }));
+    const sourceTableRows = table.map((id, sourceIndex) => { const match = /^t(\d+)(u|a)$/u.exec(id); return { sourceIndex, turn: match ? Number(match[1]) : undefined, role: match ? match[2] === 'u' ? 'user' : 'assistant' : undefined }; });
+    const auxiliary = session.auxiliary ?? [];
+    return sanitizeNumberingDiagnostic({ previousThroughTurn: memoryValue.through_turn, requestedThroughTurn: prepared.throughTurn, payloadThroughTurn: payload.through_turn,
+        payloadPreviousThroughTurn: payload.previous_memory?.t ?? payload.previous_memory?.through_turn, completedThroughTurn: session.completedThrough, archiveRowCount: session.anchors?.length, openingCount: session.opening?.length,
+        selectedRowCount: selectedRows.length, sourceTableCount: table.length, auxiliaryCount: auxiliary.length,
+        requestMatchesPayload: payload.through_turn === prepared.throughTurn && (payload.previous_memory?.t ?? payload.previous_memory?.through_turn) === memoryValue.through_turn && payloadRows.length === selectedRows.length && payloadRows.every((row, i) => row.turn === selectedRows[i].turn && row.role === selectedRows[i].role && (!prepared.sourceTable || row.sourceIndex === selectedRows[i].sourceIndex)) && selected.at(-1)?.turn === prepared.throughTurn,
+        truncated: selectedRows.length > 128 || payloadRows.length > 128 || table.length > 128 || auxiliary.length > 128 || selectedRows.some(row => row.nativeRows?.length > 128),
+        selectedRows, payloadRows, sourceTableRows, auxiliaryRows: auxiliary.map(row => ({ nativeRow: row.source_row, kind: row.kind })) });
+}
 function stats(value) { return { ...numeric(value, statsKeys), finishReason: choice(value?.finishReason, finishes) }; }
 function date(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u.test(value) ? value : undefined; }
 function memory(value) {
-    return { ...numeric(value, metricKeys), turnDiagnostic: sanitizeTurnDiagnostic(value?.turnDiagnostic), status: choice(value?.status, memoryStatuses), errorCode: choice(value?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.error), latestState: { status: choice(value?.latestState?.status, memoryStatuses), errorCode: choice(value?.latestState?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.latestState?.error) }, modelStats: stats(value?.modelStats) };
+    return { ...numeric(value, metricKeys), numberingDiagnostic: sanitizeNumberingDiagnostic(value?.numberingDiagnostic), turnDiagnostic: sanitizeTurnDiagnostic(value?.turnDiagnostic), status: choice(value?.status, memoryStatuses), errorCode: choice(value?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.error), latestState: { status: choice(value?.latestState?.status, memoryStatuses), errorCode: choice(value?.latestState?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.latestState?.error) }, modelStats: stats(value?.modelStats) };
 }
 export function diagnosticJob(job) {
     const summary = job.sessionSummary;
@@ -54,7 +80,7 @@ export function diagnosticJob(job) {
         postDialogueMs: timings.summaryPersisted >= timings.dialogueComplete ? timings.summaryPersisted - timings.dialogueComplete : undefined,
         modelStats: stats(job.modelStats), inputProgress: numeric(job.progress?.inputProgress, ['cachedTokens', 'totalTokens', 'processedTokens', 'fraction']),
         memory: memory(job.memoryMetrics), memoryMetricsAvailable: Boolean(job.memoryMetrics),
-        summary: { turnDiagnostic: sanitizeTurnDiagnostic(summary?.turnDiagnostic), status: choice(summary?.status, memoryStatuses), keepRaw: boolean(summary?.keepRaw ?? outcome?.keepRaw), errorCode: choice(summary?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(summary?.error) },
+        summary: { numberingDiagnostic: sanitizeNumberingDiagnostic(summary?.numberingDiagnostic), turnDiagnostic: sanitizeTurnDiagnostic(summary?.turnDiagnostic), status: choice(summary?.status, memoryStatuses), keepRaw: boolean(summary?.keepRaw ?? outcome?.keepRaw), errorCode: choice(summary?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(summary?.error) },
         outcome: { latestStateStatus: choice(outcome?.latestStateStatus, memoryStatuses), episodicStatus: choice(outcome?.episodicStatus, memoryStatuses), keepRaw: boolean(outcome?.keepRaw) },
         errorCode: diagnosticErrorCode(job.error),
     };

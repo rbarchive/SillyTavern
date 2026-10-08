@@ -1,11 +1,11 @@
 import { persistFailureDiagnostic } from './generation-failure-diagnostics.js';
-import { diagnosticJob, recordPhaseDiagnostics, finishPhaseDiagnostics } from './generation-job-diagnostics.js';
+import { diagnosticJob, recordPhaseDiagnostics, finishPhaseDiagnostics, buildNumberingDiagnostic } from './generation-job-diagnostics.js';
 /** Durable, user-scoped generation jobs. Providers are never replayed after restart. */
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { nativeRowHash, nativeProviderCoverage, nativePrefixBoundary } from './endpoints/backends/native-history.js';
-import { nativeSession, sourcesFor, revision } from './endpoints/backends/context-memory.js';
+import { nativeSession, sourcesFor, revision, buildDeltaRequest } from './endpoints/backends/context-memory.js';
 
 const active = new Map();
 const previews = new Map();
@@ -144,6 +144,42 @@ export async function listJobSummaries(user, { recover = true } = {}) {
         }
     }
     return summaries.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Numeric reconstruction only. No recovery, LLM call, or content export. */
+export async function latestFailedNumbering(user) {
+    const receipts = await listJobSummaries(user, { recover: false });
+    const receipt = receipts.find(row => terminal.has(row.status) && row.diagnostics?.summary?.errorCode === 'COMPACT_TURN_MISMATCH');
+    if (!receipt) return { available: false, reason: 'NO_TURN_FAILURE' };
+    const job = await getJob(user, receipt.id); // terminal-only: no crash recovery
+    const rows = readChat(chatPath(user, job.origin));
+    const anchor = job.summaryAnchor;
+    if (!Array.isArray(anchor) || !anchor.length || rows.length < anchor.length || rows.slice(0, anchor.length).some((row, index) => storyHash(row) !== anchor[index])) return { available: false, reason: 'HISTORICAL_SOURCE_CHANGED' };
+    const session = nativeSession(rows.slice(0, anchor.length));
+    const target = receipt.diagnostics.summary.turnDiagnostic?.expectedTurn ?? receipt.diagnostics.memory.targetThroughTurn;
+    if (!Number.isSafeInteger(target) || target < 1 || target > session.completedThrough) return { available: false, reason: 'INVALID_TARGET' };
+    let previous;
+    for (const other of receipts) {
+        if (other.status !== 'completed' || other.sessionSummary?.status !== 'complete' || other.updatedAt > job.createdAt || other.origin?.file !== job.origin.file || other.origin?.avatar !== job.origin.avatar || other.origin?.group !== job.origin.group) continue;
+        const candidate = await getJob(user, other.id);
+        if (candidate.sessionSummary?.contextKey !== job.sessionSummary?.contextKey || candidate.sessionSummary?.usable === false || candidate.sessionSummary?.mode !== 'context-v1') continue;
+        const prefix = candidate.prefixAnchor;
+        if (!Array.isArray(prefix) || !prefix.length || prefix.length > session.anchors.length || prefix.some((hash, index) => hash !== session.anchors[index])) continue;
+        previous = candidate.sessionSummary.summary; break;
+    }
+    if (!previous) return { available: false, reason: 'NO_VALID_HISTORICAL_CHECKPOINT', historyUnchanged: true };
+    if (!Number.isSafeInteger(previous.through_turn) || previous.through_turn >= target) return { available: false, reason: 'INVALID_CHECKPOINT' };
+    const selected = session.messages.filter(row => row.turn > previous.through_turn && row.turn <= target);
+    const prepared = buildDeltaRequest({}, { fixedContext: '', memory: previous, messages: selected, wireFormat: 'compact-v2' });
+    const numbering = buildNumberingDiagnostic(prepared, selected, previous, session);
+    const returned = receipt.diagnostics.summary.turnDiagnostic?.returnedTurn;
+    const nativeRows = turn => session.messages.filter(row => row.turn === turn).flatMap(row => row.source_rows ?? []).filter(x => Number.isSafeInteger(x) && x >= 0).slice(0, 128);
+    return { available: true, basis: 'UNCHANGED_ARCHIVE_RECONSTRUCTION', exactPayloadObserved: false, historyUnchanged: true,
+        jobRef: receipt.diagnostics.jobRef, numbering, turnDiagnostic: receipt.diagnostics.summary.turnDiagnostic,
+        returnedMatchesPrevious: Number.isFinite(returned) ? returned === previous.through_turn : undefined,
+        returnedMatchesSelectedTurn: Number.isFinite(returned) ? selected.some(row => row.turn === returned) : undefined,
+        returnedMatchesSourceIndex: Number.isFinite(returned) ? prepared.sourceTable?.some((_, index) => index === returned) : undefined,
+        returnedNativeRows: Number.isSafeInteger(returned) ? nativeRows(returned) : [], requestedNativeRows: nativeRows(target) };
 }
 
 /** Accept once, persist before launching, and run independently of the HTTP connection.

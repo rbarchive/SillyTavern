@@ -1,4 +1,4 @@
-import { diagnosticErrorCode, sanitizeTurnDiagnostic } from '../../generation-job-diagnostics.js';
+import { diagnosticErrorCode, sanitizeTurnDiagnostic, buildNumberingDiagnostic } from '../../generation-job-diagnostics.js';
 import { runLatestContextMemoryTurn } from './latest-context-memory-runner.js';
 import { assembleContextMessages, planConsolidation, buildDeltaRequest, mergeMemoryDelta, sourcesFor, revision, nativePrefixBoundary } from './context-memory.js';
 import { buildFreeDialogueRequest } from './separate-session-summary.js';
@@ -45,6 +45,7 @@ export async function runContextMemoryTurn(options) {
         }
         const prepared = buildDeltaRequest(actor, { fixedContext, memory: assembled.memory, messages: prefix, wireFormat: memoryWireFormat });
         metrics.targetThroughTurn = prepared.throughTurn;
+        metrics.numberingDiagnostic = buildNumberingDiagnostic(prepared, prefix, assembled.memory, stored);
         const catalog = sourcesFor(stored.messages, prepared.throughTurn);
         const sourceRevision = revision(catalog);
         metrics.invocationCount = 1; metrics.status = 'generating'; report();
@@ -62,6 +63,6 @@ export async function runContextMemoryTurn(options) {
         return { ...reply, sessionSummary: { mode: 'context-v1', status: 'complete', summary: memory, sourceRevision, previousThrough: assembled.memory.through_turn, targetAnchor: stored.anchors.slice(0, nativePrefixBoundary(stored, prepared.throughTurn)) } };
     } catch (error) {
         metrics.status = 'failed'; metrics.totalMs = Date.now() - metrics.startedAt; metrics.errorCode = diagnosticErrorCode(error); metrics.turnDiagnostic = sanitizeTurnDiagnostic(error.turnDiagnostic); metrics.error = error.name === 'AbortError' ? 'Memory cancelled' : error.message; report();
-        return { ...reply, sessionSummary: { mode: 'context-v1', status: 'failed', error: metrics.error, errorCode: metrics.errorCode, turnDiagnostic: metrics.turnDiagnostic, keepRaw: true } };
+        return { ...reply, sessionSummary: { mode: 'context-v1', status: 'failed', error: metrics.error, errorCode: metrics.errorCode, turnDiagnostic: metrics.turnDiagnostic, numberingDiagnostic: metrics.numberingDiagnostic, keepRaw: true } };
     } finally { signal?.removeEventListener('abort', abort); }
 }

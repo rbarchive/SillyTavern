@@ -10,7 +10,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import sanitize from 'sanitize-filename';
 import { sync as writeAtomic } from 'write-file-atomic';
-import { acceptJob, getJob, listJobSummaries, cancelJob, stopPendingSessionSummaries, latestSessionSummary, sessionSummarySourceCoverage, contextMemorySourceCoverage, compactSessionMessages, readNativeSession } from '../generation-jobs.js';
+import { acceptJob, getJob, listJobSummaries, latestFailedNumbering, cancelJob, stopPendingSessionSummaries, latestSessionSummary, sessionSummarySourceCoverage, contextMemorySourceCoverage, compactSessionMessages, readNativeSession } from '../generation-jobs.js';
 import { buildSessionSummaryContext } from './backends/inline-session-summary.js';
 import { runCustomGeneration } from './backends/durable-custom.js';
 import { runComfyGeneration } from './stable-diffusion.js';
@@ -158,6 +158,12 @@ router.get('/', async (req, res) => {
     try { res.send(await listJobSummaries(req.user)); } catch (error) { res.status(500).send({ error: error.message }); }
 });
 // Safe operational export. No recovery, provider call, raw errors or content fields.
+router.get('/diagnostics/failures/numbering', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!req.user?.directories?.root) return res.status(401).json({ errorCode: 'AUTH_REQUIRED' });
+    try { return res.json({ schemaVersion: 1, ...await latestFailedNumbering(req.user) }); }
+    catch { return res.status(500).json({ errorCode: 'DIAGNOSTICS_UNAVAILABLE' }); }
+});
 router.post('/diagnostics/failures/export', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     if (!req.user?.directories?.root) return res.status(401).json({ errorCode: 'AUTH_REQUIRED' });
