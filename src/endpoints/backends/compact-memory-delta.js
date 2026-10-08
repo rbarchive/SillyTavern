@@ -43,7 +43,17 @@ export function encodeCompactInput(memory, messages, sourceTable) {
 
 /** Decode syntax only. No semantic inference, source guessing or partial acceptance. */
 export function decodeCompactDelta(value, prepared, memory) {
-    const fail = code => { const error = new Error('Invalid compact delta'); error.code = code; throw error; };
+    const fail = code => {
+        const error = new Error('Invalid compact delta'); error.code = code;
+        if (['COMPACT_TURN_MISSING', 'COMPACT_TURN_MISMATCH'].includes(code)) {
+            const returned = value.t;
+            const returnedType = !Object.hasOwn(value, 't') ? 'missing' : returned === null ? 'null' : Array.isArray(returned) ? 'array' : typeof returned;
+            error.turnDiagnostic = { expectedTurn: prepared.throughTurn, returnedType };
+            if (typeof returned === 'number' && Number.isFinite(returned)) error.turnDiagnostic.returnedTurn = returned;
+            if (typeof returned === 'string' && /^\d{1,16}$/u.test(returned) && Number.isSafeInteger(Number(returned))) error.turnDiagnostic.numericStringTurn = Number(returned);
+        }
+        throw error;
+    };
     if (!value || typeof value !== 'object' || Array.isArray(value)) fail('COMPACT_NOT_OBJECT');
     if (!Object.hasOwn(value, 'v')) fail('COMPACT_VERSION_MISSING');
     if (value.v !== 2) fail('COMPACT_VERSION_MISMATCH');

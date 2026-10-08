@@ -50,3 +50,9 @@ User authorized commit/push on2026-10-08. Paired milestone label: `milestone/rp-
 - `GET /api/generation-jobs/diagnostics/failures?limit=20`은 별도 파일만 읽는다. 기존 작업/대화 저장소를 열지 않는다. 파일을 다시 허용목록으로 검증하고 알 수 없는 필드/오류 문자열은 제외한다. 손상/잘못된 기록·symlink는 unreadableRecords 수로만 보고한다. 조회는 파일 생성/복구하지 않음.
 - `POST /api/generation-jobs/diagnostics/failures/export` body `{ "limit":100 }`은 기존 최신<=100개 작업의 safe snapshot 중 실패만 명시적으로 별도 추출한다. 로그인·CSRF 경계 유지, 응답은 written/skipped/writeFailures 숫자만. 반복실행 가능하며 원래 파일과 작업 상태는 변경하지 않는다. 실행 전 운영 조회·쓰기 권한 확인 필요. 자동 startup backfill 없음.
 - 검증: 실제 합성 작업 실패→자동 파일 생성, 완료된 대화의 기억 실패·state-only 실패, 내용 sentinel 미저장,0600,동일job1파일,디스크 장애가 작업결과에 영향 없음, 원래 작업·대화 제거 후 실패API 조회, 기존 실패 HTTP수동추출2회 원래bytes 불변, 변조/손상파일 재검증. 전체ST338/338+문법/diff 검사 통과. ST_FAILURE_ARCHIVE_TESTS.log. 실제 운영 디스크·모델 실패는 미검증,8000/8001미적용·commit/push0.
+
+
+#### 턴 번호 불일치 내용 없는 상세 계측
+- COMPACT_TURN_MISSING/MISMATCH에 turnDiagnostic을 붙인다: expectedTurn, 반환값의 고정 returnedType, 숫자인 경우 유한 returnedTurn, 숫자로만 된 문자열인 경우 안전한 numericStringTurn. 원래 문자열/배열/객체는 기록하지 않는다. 타입만 다르더라도 기존과 동일하게 실패 처리하고 검증 완화/자동값덮어쓰기 없음.
+- runner→sessionSummary/memoryMetrics→safe API→실패JSON 저장/재검증까지 전달. 과거 결과에 없는 이 값을 소급 복원하지 않으며 새 작업부터 기록한다. 예 expected13/returnedType:string/numericStringTurn13과 expected13/returnedType:number/returnedTurn2를 구분 가능.
+- 합성 숫자·숫자문자열·누락·임의본문·객체·null·소수 cases 및 실제 background runner 전달, 파일archive재조회 검증. ST339/339 통과; 로그 ST_TURN_DIAGNOSTICS_TESTS.log. 이 변경은 관측만 강화하며 당시운영실패원인의확정/수정은아직아님.

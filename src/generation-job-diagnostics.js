@@ -23,10 +23,20 @@ export function diagnosticErrorCode(error) {
     if (error instanceof SyntaxError) return 'MEMORY_JSON_INVALID';
     return legacyCodes.get(typeof error === 'string' ? error : error.message) ?? 'ERROR_UNCLASSIFIED';
 }
+/** Only shape and numeric boundary metadata; never return a raw string/object. */
+export function sanitizeTurnDiagnostic(value) {
+    if (!value || typeof value !== 'object') return undefined;
+    const result = {};
+    if (Number.isSafeInteger(value.expectedTurn) && value.expectedTurn >= 0) result.expectedTurn = value.expectedTurn;
+    if (['missing', 'null', 'array', 'object', 'string', 'boolean', 'number'].includes(value.returnedType)) result.returnedType = value.returnedType;
+    if (value.returnedType === 'number' && Number.isFinite(value.returnedTurn)) result.returnedTurn = value.returnedTurn;
+    if (value.returnedType === 'string' && Number.isSafeInteger(value.numericStringTurn) && value.numericStringTurn >= 0) result.numericStringTurn = value.numericStringTurn;
+    return Object.keys(result).length ? result : undefined;
+}
 function stats(value) { return { ...numeric(value, statsKeys), finishReason: choice(value?.finishReason, finishes) }; }
 function date(value) { return typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u.test(value) ? value : undefined; }
 function memory(value) {
-    return { ...numeric(value, metricKeys), status: choice(value?.status, memoryStatuses), errorCode: choice(value?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.error), latestState: { status: choice(value?.latestState?.status, memoryStatuses), errorCode: choice(value?.latestState?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.latestState?.error) }, modelStats: stats(value?.modelStats) };
+    return { ...numeric(value, metricKeys), turnDiagnostic: sanitizeTurnDiagnostic(value?.turnDiagnostic), status: choice(value?.status, memoryStatuses), errorCode: choice(value?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.error), latestState: { status: choice(value?.latestState?.status, memoryStatuses), errorCode: choice(value?.latestState?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(value?.latestState?.error) }, modelStats: stats(value?.modelStats) };
 }
 export function diagnosticJob(job) {
     const summary = job.sessionSummary;
@@ -44,7 +54,7 @@ export function diagnosticJob(job) {
         postDialogueMs: timings.summaryPersisted >= timings.dialogueComplete ? timings.summaryPersisted - timings.dialogueComplete : undefined,
         modelStats: stats(job.modelStats), inputProgress: numeric(job.progress?.inputProgress, ['cachedTokens', 'totalTokens', 'processedTokens', 'fraction']),
         memory: memory(job.memoryMetrics), memoryMetricsAvailable: Boolean(job.memoryMetrics),
-        summary: { status: choice(summary?.status, memoryStatuses), keepRaw: boolean(summary?.keepRaw ?? outcome?.keepRaw), errorCode: choice(summary?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(summary?.error) },
+        summary: { turnDiagnostic: sanitizeTurnDiagnostic(summary?.turnDiagnostic), status: choice(summary?.status, memoryStatuses), keepRaw: boolean(summary?.keepRaw ?? outcome?.keepRaw), errorCode: choice(summary?.errorCode, diagnosticCodes) ?? diagnosticErrorCode(summary?.error) },
         outcome: { latestStateStatus: choice(outcome?.latestStateStatus, memoryStatuses), episodicStatus: choice(outcome?.episodicStatus, memoryStatuses), keepRaw: boolean(outcome?.keepRaw) },
         errorCode: diagnosticErrorCode(job.error),
     };

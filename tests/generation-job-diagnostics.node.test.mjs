@@ -72,3 +72,17 @@ test('missing diagnostics storage is not created by read-only listing', async ()
     try { assert.deepEqual(await listJobSummaries({ directories: { root } }, { recover: false }), []); assert.equal(fs.existsSync(path.join(root, 'generation-jobs')), false); }
     finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('turn failure records numeric boundary and type without raw content or validation repair', () => {
+    const prepared = { throughTurn: 13, sourceTable: ['m1'] }, memory = { overview: '' };
+    for (const [returned, expected] of [[2, { expectedTurn: 13, returnedType: 'number', returnedTurn: 2 }], ['13', { expectedTurn: 13, returnedType: 'string', numericStringTurn: 13 }], [secret, { expectedTurn: 13, returnedType: 'string' }], [{ text: secret }, { expectedTurn: 13, returnedType: 'object' }], [null, { expectedTurn: 13, returnedType: 'null' }], [13.5, { expectedTurn: 13, returnedType: 'number', returnedTurn: 13.5 }]]) {
+        assert.throws(() => decodeCompactDelta({ v: 2, t: returned }, prepared, memory), error => {
+            assert.equal(error.code, 'COMPACT_TURN_MISMATCH'); assert.deepEqual(error.turnDiagnostic, expected);
+            const diagnostic = diagnosticJob({ sessionSummary: { status: 'failed', turnDiagnostic: { ...error.turnDiagnostic, raw: secret } }, memoryMetrics: { turnDiagnostic: error.turnDiagnostic } });
+            assert.deepEqual(diagnostic.summary.turnDiagnostic, expected); assert.deepEqual(diagnostic.memory.turnDiagnostic, expected);
+            assert.ok(!JSON.stringify(diagnostic).includes(secret)); assert.ok(!JSON.stringify(error).includes(secret)); return true;
+        });
+    }
+    assert.throws(() => decodeCompactDelta({ v: 2 }, prepared, memory), error => { assert.deepEqual(error.turnDiagnostic, { expectedTurn: 13, returnedType: 'missing' }); return true; });
+    assert.equal(decodeCompactDelta({ v: 2, t: 13 }, prepared, memory).through_turn, 13);
+});

@@ -12,7 +12,7 @@ const { router } = await import('../src/endpoints/generation-jobs.js');
 const secret = 'PRIVATE_CHAT_WORLD_MEMORY';
 const failed = { id: secret, status: 'completed', createdAt: '2026-10-08T00:00:00.000Z', updatedAt: '2026-10-08T00:01:00.000Z', dialogueReady: true,
     message: { mes: secret }, result: { text: secret }, origin: { file: secret },
-    sessionSummary: { status: 'failed', errorCode: 'COMPACT_TURN_MISMATCH', error: secret, keepRaw: true, memoryOutcome: { latestStateStatus: 'complete', episodicStatus: 'failed', keepRaw: true } },
+    sessionSummary: { status: 'failed', errorCode: 'COMPACT_TURN_MISMATCH', turnDiagnostic: { expectedTurn: 13, returnedType: 'string', numericStringTurn: 13, raw: secret }, error: secret, keepRaw: true, memoryOutcome: { latestStateStatus: 'complete', episodicStatus: 'failed', keepRaw: true } },
     memoryMetrics: { latestStateMs: 20, episodicMs: 30, status: 'failed', errorCode: 'COMPACT_TURN_MISMATCH' } };
 
 test('terminal memory failure writes one private content-free file, success and cancellation do not', async t => {
@@ -25,7 +25,7 @@ test('terminal memory failure writes one private content-free file, success and 
     assert.match(files[0], /^[a-f0-9]{24}\.json$/); const file = path.join(dir, files[0]); assert.ok(!fs.readFileSync(file, 'utf8').includes(secret));
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     const rows = await listFailureDiagnostics(root); assert.equal(rows.failures.length, 1); assert.deepEqual(rows.failures[0].failureKinds, ['episodic']);
-    assert.equal(rows.failures[0].diagnostic.summary.errorCode, 'COMPACT_TURN_MISMATCH'); assert.equal(rows.failures[0].diagnostic.memory.episodicMs, 30);
+    assert.equal(rows.failures[0].diagnostic.summary.errorCode, 'COMPACT_TURN_MISMATCH'); assert.deepEqual(rows.failures[0].diagnostic.summary.turnDiagnostic, { expectedTurn: 13, returnedType: 'string', numericStringTurn: 13 }); assert.equal(rows.failures[0].diagnostic.memory.episodicMs, 30);
     const stored = JSON.parse(fs.readFileSync(file)); stored.diagnostic.origin = { file: secret }; stored.diagnostic.errorCode = secret; stored.diagnostic.phaseStats = { episodic: { content: secret, durationMs: 10 } };
     fs.writeFileSync(file, JSON.stringify(stored)); assert.ok(!JSON.stringify(await listFailureDiagnostics(root)).includes(secret));
     fs.writeFileSync(path.join(dir, 'a'.repeat(24) + '.json'), '{'); assert.equal((await listFailureDiagnostics(root)).unreadableRecords, 1);

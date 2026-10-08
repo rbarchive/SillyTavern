@@ -39,6 +39,8 @@ test('real background runner forwards only content-free phase stats and coded fa
   }});
   finishPhaseDiagnostics(job);
   assert.equal(result.sessionSummary.errorCode,'COMPACT_TURN_MISMATCH');
+  assert.equal(result.sessionSummary.turnDiagnostic.returnedTurn,999);
+  assert.ok(Number.isSafeInteger(result.sessionSummary.turnDiagnostic.expectedTurn));
   for(const phase of ['latest-state','episodic']){assert.equal(job.phaseDiagnostics[phase].modelStats.inputTokens,42);assert.ok(Number.isFinite(job.phaseDiagnostics[phase].firstContentMs));}
   assert.ok(!JSON.stringify(events).includes('PRIVATE_WRITER_OUTPUT'));
   assert.ok(!JSON.stringify(diagnosticJob(job)).includes('PRIVATE_WRITER_OUTPUT'));
