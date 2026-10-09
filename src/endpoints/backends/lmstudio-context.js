@@ -145,8 +145,8 @@ export async function withLmStudioModelLock(baseUrl, action, signal) {
 export async function withLmStudioImageModel(options, action) {
     const apiUrl = lmStudioModelsUrl(options.baseUrl);
     return withLmStudioModelLock(options.baseUrl, async () => {
-        const request = (suffix = '', body) => apiRequest(options.fetchImpl, apiUrl + suffix, undefined, {
-            method: body ? 'POST' : 'GET', signal: options.signal,
+        const request = (suffix = '', body, signal = options.signal) => apiRequest(options.fetchImpl, apiUrl + suffix, undefined, {
+            method: body ? 'POST' : 'GET', signal,
             ...(body ? { body: JSON.stringify(body) } : {}),
         });
         const getSelected = catalog => {
@@ -157,13 +157,46 @@ export async function withLmStudioImageModel(options, action) {
         };
         let selected = getSelected(await request());
         let instance = selected.loaded_instances?.find(i => hasContext(i.config, options.contextLength));
-        if (!instance && selected.loaded_instances?.length) throw new Error('선택 모델의 로드된 컨텍스트가 부족합니다. 컨텍스트 설정을 낮추거나 LM Studio에서 해당 모델만 다시 로드해 주세요.');
+        if (!instance && selected.loaded_instances?.length) {
+            if (!options.reloadIfNeeded) throw new Error('선택 모델의 로드된 컨텍스트가 부족합니다. 이미지 생성 설정에서 컨텍스트를 늘린 뒤 “적용 및 모델 로드”를 눌러 주세요.');
+            const instances = selected.loaded_instances;
+            if (instances.length !== 1 || instances[0].id !== options.model || !Number.isSafeInteger(instances[0].config?.context_length)) {
+                throw new Error('추가 인스턴스 또는 사용자 지정 이름이 있는 모델은 LM Studio에서 직접 다시 로드해 주세요.');
+            }
+            const previous = instances[0];
+            const loadBody = contextLength => {
+                const body = { model: options.model, context_length: contextLength, echo_load_config: true };
+                for (const key of ['eval_batch_size', 'flash_attention', 'num_experts', 'offload_kv_cache_to_gpu']) {
+                    if (previous.config[key] !== undefined) body[key] = previous.config[key];
+                }
+                return body;
+            };
+            await request('/unload', { instance_id: previous.id });
+            try {
+                await request('/load', loadBody(options.contextLength));
+                selected = getSelected(await request());
+                instance = selected.loaded_instances?.find(i => hasContext(i.config, options.contextLength));
+                if (!instance) throw new Error('요청한 컨텍스트로 로드되었는지 확인하지 못했습니다.');
+            } catch (error) {
+                try {
+                    const current = getSelected(await request('', undefined, null));
+                    for (const replacement of current.loaded_instances || []) {
+                        if (replacement.id !== previous.id) throw new Error('모델 인스턴스가 변경되어 자동 복원을 중단했습니다.');
+                        await request('/unload', { instance_id: replacement.id }, null);
+                    }
+                    await request('/load', loadBody(previous.config.context_length), null);
+                    const restored = getSelected(await request('', undefined, null));
+                    if (!restored.loaded_instances?.some(i => i.id === previous.id && hasContext(i.config, previous.config.context_length))) throw new Error('이전 컨텍스트 복원을 확인하지 못했습니다.');
+                } catch (recoveryError) { throw new Error(`${error.message} 이전 모델 복원 실패: ${recoveryError.message}`); }
+                throw error;
+            }
+        }
         if (!instance) {
             await request('/load', { model: options.model, context_length: options.contextLength, echo_load_config: true });
             selected = getSelected(await request());
             instance = selected.loaded_instances?.find(i => hasContext(i.config, options.contextLength));
         }
         if (!instance?.id) throw new Error('이미지 묘사 모델 로드와 컨텍스트를 확인하지 못했습니다.');
-        return action(instance.id);
+        return action(instance.id, instance.config);
     }, options.signal);
 }

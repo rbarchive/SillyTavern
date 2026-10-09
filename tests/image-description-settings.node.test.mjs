@@ -5,7 +5,7 @@ import { defaultImageDescriptionSettings, imageDescriptionSnapshot } from '../pu
 test('defaults are fresh and have no aliases', () => {
     const a = defaultImageDescriptionSettings();
     const b = defaultImageDescriptionSettings();
-    assert.deepEqual(a, { mode: 'main', url: 'http://127.0.0.1:9998/v1', model: 'gemma-4-e4b-uncensored-hauhaucs-aggressive', context_length: 8192, max_tokens: 512 });
+    assert.deepEqual(a, { mode: 'main', url: 'http://127.0.0.1:9998/v1', model: 'gemma-4-e4b-uncensored-hauhaucs-aggressive', context_length: 32768, max_tokens: 512 });
     a.model = 'changed';
     assert.equal(b.model, 'gemma-4-e4b-uncensored-hauhaucs-aggressive');
 });
@@ -34,4 +34,3 @@ for (const [name, patch] of [
     const config = { mode: 'dedicated', url: 'http://127.0.0.1:9998/v1', model: 'vision', context_length: 8192, max_tokens: 512, ...patch };
     assert.throws(() => imageDescriptionSnapshot({ image_description: config }));
 });
-

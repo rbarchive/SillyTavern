@@ -23,6 +23,13 @@ export async function listDescriptionModels(input, { fetchImpl = fetch, signal }
         loaded: !!m.loaded_instances?.length, context_length: m.loaded_instances?.[0]?.config?.context_length })) };
 }
 
+/** Explicit UI action: reload only the selected description model if needed. */
+export async function loadDescriptionModel(input, { fetchImpl = fetch, signal } = {}) {
+    const settings = validateDescriptionSettings(input);
+    return withLmStudioImageModel({ baseUrl: settings.url, model: settings.model, contextLength: settings.context_length, fetchImpl, signal, reloadIfNeeded: true },
+        (model, config) => ({ model, context_length: config.context_length }));
+}
+
 /** Dedicated requests use only their own allowlisted settings, never chat secrets/YAML. */
 export async function runDedicatedImageDescription(input, settingsInput, signal, onProgress = () => {}, { fetchImpl = fetch } = {}) {
     const settings = validateDescriptionSettings(settingsInput);

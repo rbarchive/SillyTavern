@@ -13,6 +13,8 @@ test('real HTTP catalog, actual inference test, generation and invalid input sta
  const request=async(route,body)=>fetch(`http://127.0.0.1:${server.address().port}/image/${route}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  try {
   assert.deepEqual((await (await request('models',{settings})).json()).models.map(m=>m.key),['gemma']);assert.equal(calls.length,0);
+  assert.deepEqual(await (await request('load',{settings})).json(),{model:'gemma',context_length:8192});assert.equal(calls.length,0);
+  assert.equal((await request('load',{settings:{...settings,context_length:0}})).status,400);assert.equal(calls.length,0);
   const checked=await (await request('test',{settings})).json();assert.equal(checked.model,'gemma');assert.equal(calls.length,1);assert.ok(checked.totalMs>=0);
   const result=await (await request('generate',{settings,messages:[{role:'user',content:'Brown hair. Gray coat.'}],model:'main',custom_url:'http://wrong'})).json();assert.equal(result.model,'gemma');assert.match(result.text,/gray coat/);assert.equal(calls.length,2);
   assert.equal(calls[1].model,'gemma');assert.equal(calls[1].max_tokens,512);assert.equal(calls[1].reasoning_effort,'none');

@@ -2,7 +2,7 @@ const DESCRIPTION_DEFAULTS = Object.freeze({
     mode: 'main',
     url: 'http://127.0.0.1:9998/v1',
     model: 'gemma-4-e4b-uncensored-hauhaucs-aggressive',
-    context_length: 8192,
+    context_length: 32768,
     max_tokens: 512,
 });
 
@@ -78,27 +78,54 @@ export function mountImageDescriptionSettings({ container, settings, save, reque
     modelSelect.value = current.model || DESCRIPTION_DEFAULTS.model;
     root.append(field(doc, '전용 모델', modelSelect));
 
+    const context = doc.createElement('input'); context.type = 'number'; context.id = 'sd_description_context'; context.className = 'text_pole'; context.value = String(current.context_length);
+    context.min = '1024'; context.max = '131072'; context.step = '1';
+    const contextField = field(doc, '묘사 모델 컨텍스트 길이 (토큰)', context);
+    root.append(contextField);
+    const contextHelp = doc.createElement('small');
+    contextHelp.textContent = '긴 대화는 32768 이상으로 설정해 주세요. 적용 시 선택한 모델만 다시 로드하며, 해당 모델의 진행 중인 작업이 끝난 뒤 적용해 주세요.';
+    root.append(contextHelp);
+
     const advanced = doc.createElement('details'); advanced.open = false;
     const summary = doc.createElement('summary'); summary.textContent = '고급 연결 설정'; advanced.append(summary);
     const url = doc.createElement('input'); url.type = 'url'; url.id = 'sd_description_url'; url.className = 'text_pole'; url.value = current.url;
-    const context = doc.createElement('input'); context.type = 'number'; context.id = 'sd_description_context'; context.className = 'text_pole'; context.value = String(current.context_length);
     const output = doc.createElement('input'); output.type = 'number'; output.id = 'sd_description_output'; output.className = 'text_pole'; output.value = String(current.max_tokens);
-    advanced.append(field(doc, 'LM Studio URL', url), field(doc, '컨텍스트 길이', context), field(doc, '최대 출력 토큰', output)); root.append(advanced);
+    advanced.append(field(doc, 'LM Studio URL', url), field(doc, '최대 출력 토큰', output)); root.append(advanced);
 
     const actions = doc.createElement('div'); actions.className = 'image-description-actions';
     const refresh = doc.createElement('button'); refresh.type = 'button'; refresh.id = 'sd_description_refresh'; refresh.className = 'menu_button'; refresh.textContent = '모델 새로고침';
+    const load = doc.createElement('button'); load.type = 'button'; load.id = 'sd_description_load'; load.className = 'menu_button'; load.textContent = '적용 및 모델 로드';
     const test = doc.createElement('button'); test.type = 'button'; test.id = 'sd_description_test'; test.className = 'menu_button'; test.textContent = '연결 및 추론 테스트';
-    actions.append(refresh, test); root.append(actions);
+    actions.append(load, refresh, test); root.append(actions);
     const status = doc.createElement('div'); status.id = 'sd_description_status'; status.setAttribute('aria-live', 'polite'); root.append(status);
     container.append(root);
 
     let revision = 0;
     let busy = false;
     const readConfig = () => ({ mode: mode.value, url: url.value, model: modelSelect.value, context_length: Number(context.value), max_tokens: Number(output.value) });
-    const persist = () => { settings.image_description = readConfig(); save(); revision += 1; status.textContent = '설정이 변경되었습니다.'; };
+    const persist = () => { settings.image_description = readConfig(); save(); revision += 1; status.textContent = mode.value === 'main' ? '현재 대화 모델을 사용합니다.' : '설정이 저장되었습니다. 컨텍스트 변경 후 “적용 및 모델 로드”를 눌러 주세요.'; };
     [mode, modelSelect, url, context, output].forEach(element => element.addEventListener('change', persist));
     const dedicatedPayload = () => validatedConfig({ ...readConfig(), mode: 'dedicated' });
-    const setBusy = value => { busy = value; refresh.disabled = value; test.disabled = value || mode.value === 'main'; };
+    const setBusy = value => {
+        busy = value; refresh.disabled = value;
+        load.disabled = test.disabled = value || mode.value === 'main';
+        [mode, modelSelect, url, context, output].forEach(element => { element.disabled = value || (element !== mode && mode.value === 'main'); });
+    };
+
+    load.addEventListener('click', async () => {
+        if (busy || mode.value !== 'dedicated') return;
+        let config;
+        try { config = dedicatedPayload(); } catch (error) { status.textContent = error.message; return; }
+        settings.image_description = config; save();
+        const token = ++revision;
+        setBusy(true); status.textContent = '설정한 컨텍스트로 묘사 모델을 로드하는 중입니다.';
+        try {
+            const result = await request('/api/image-description/load', { settings: config });
+            if (token !== revision) return;
+            status.textContent = `로드 완료 · 컨텍스트 ${Number(result.context_length).toLocaleString('ko-KR')}토큰`;
+        } catch (error) { if (token === revision) status.textContent = `모델을 로드하지 못했습니다: ${error.message}`; }
+        finally { setBusy(false); }
+    });
 
     refresh.addEventListener('click', async () => {
         if (busy) return;
@@ -134,7 +161,10 @@ export function mountImageDescriptionSettings({ container, settings, save, reque
         finally { setBusy(false); }
     });
 
-    const updateVisibility = () => { modelSelect.disabled = mode.value === 'main'; advanced.hidden = mode.value === 'main'; test.disabled = mode.value === 'main'; };
+    const updateVisibility = () => {
+        contextField.hidden = contextHelp.hidden = advanced.hidden = mode.value === 'main';
+        setBusy(busy);
+    };
     mode.addEventListener('change', updateVisibility); updateVisibility();
     return { root, getSnapshot: () => imageDescriptionSnapshot(settings), destroy: () => root.remove() };
 }

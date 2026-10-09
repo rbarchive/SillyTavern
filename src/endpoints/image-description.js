@@ -1,7 +1,11 @@
 import express from 'express';
-import { listDescriptionModels, runDedicatedImageDescription } from './backends/dedicated-image-description.js';
+import { listDescriptionModels, loadDescriptionModel, runDedicatedImageDescription } from './backends/dedicated-image-description.js';
 
 export const router = express.Router();
+router.post('/load', async (req, res) => {
+    try { res.send(await loadDescriptionModel(req.body.settings, { signal: AbortSignal.timeout(180000) })); }
+    catch (error) { res.status(400).send({ error: error.message }); }
+});
 router.post('/models', async (req, res) => {
     try { res.send(await listDescriptionModels(req.body.settings, { signal: AbortSignal.timeout(10000) })); }
     catch (error) { res.status(400).send({ error: error.message }); }
